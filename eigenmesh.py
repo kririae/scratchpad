@@ -8,7 +8,7 @@ import scipy.sparse as sp
 from scipy.sparse.linalg import eigsh
 from matplotlib import cm
 
-import open3d as o3d  # For visualization
+import open3d as o3d
 
 dataset = o3d.data.BunnyMesh()
 mesh = o3d.io.read_triangle_mesh(dataset.path)
@@ -16,7 +16,7 @@ mesh = o3d.io.read_triangle_mesh(dataset.path)
 v, f = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
 
 # Build the Laplacian matrix based on the mesh
-L = -igl.cotmatrix(v, f)
+L = igl.cotmatrix(v, f)
 
 # Solve the eigenvalue problem, in a brute-force way
 print('Solving the eigenvalue problem...')
