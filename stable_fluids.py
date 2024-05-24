@@ -44,7 +44,7 @@ class StableFluidSolver2D:
         self.dx_ = 1.0
         self.viscosity_ = viscosity
 
-        self.n_diffuse_ = 10
+        self.n_diffuse_ = 11
         self.n_project_ = 128
 
         # Damped jacobi iteration
