@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from typing import Any
+from typing import Any, Tuple
 
 import warp as wp
 import numpy as np
@@ -11,31 +11,15 @@ GAS = wp.constant(wp.uint8(2))
 
 
 @wp.func
-def clamp_to_domain(p: wp.vec2, width: float, height: float) -> wp.vec2:
-    return wp.vec2(
-        wp.clamp(p.x, 0.0, width - 1.0),
-        wp.clamp(p.y, 0.0, height - 1.0)
-    )
-
-
-@wp.func
 def get_at_position(
-        p: wp.vec2,
-        f: wp.array2d(dtype=Any),
+    i: int,
+    j: int,
+    f: wp.array2d(dtype=Any),
 ) -> Any:
-    width, height = float(f.shape[0]), float(f.shape[1])
-    p = clamp_to_domain(p, width, height)
-    return f[int(p.x), int(p.y)]
-
-
-@wp.func
-def get_q_at_position(
-    p: wp.vec2,
-    q: wp.array2d(dtype=wp.float32),
-) -> wp.float32:
-    width, height = float(q.shape[0]), float(q.shape[1])
-    p = clamp_to_domain(p, width, height)
-    return q[int(p.x), int(p.y)]
+    width, height = f.shape[0], f.shape[1]
+    i = wp.clamp(i, 0, width - 1)
+    j = wp.clamp(j, 0, height - 1)
+    return f[i, j]
 
 
 @wp.func
@@ -64,6 +48,30 @@ def is_gas(i: int, j: int, f: wp.array2d(dtype=wp.uint8)) -> bool:
     return f[i, j] == GAS
 
 
+@wp.func
+def get_bspline_coeff(p: wp.vec2):
+    # Calculate the corresponding grid position of this particle,
+    base = wp.vec2(wp.floor(p.x), wp.floor(p.y)) + wp.vec2(0.5, 0.5)
+    ox = wp.vec3(p.x - (base.x - 1.0), p.x - (base.x), p.x - (base.x + 1.0))
+    oy = wp.vec3(p.y - (base.y - 1.0), p.y - (base.y), p.y - (base.y + 1.0))
+
+    # Fuck WARP
+    ox.x = wp.abs(ox.x)
+    ox.y = wp.abs(ox.y)
+    ox.z = wp.abs(ox.z)
+    oy.x = wp.abs(oy.x)
+    oy.y = wp.abs(oy.y)
+    oy.z = wp.abs(oy.z)
+
+    # Quadratic B-spline kernel
+    nox = wp.vec3(0.5*(1.5-ox.x)*(1.5-ox.x), 0.75 -
+                  ox.y*ox.y, 0.5*(1.5-ox.z)*(1.5-ox.z))
+    noy = wp.vec3(0.5*(1.5-oy.x)*(1.5-oy.x), 0.75 -
+                  oy.y*oy.y, 0.5*(1.5-oy.z)*(1.5-oy.z))
+
+    return base, nox, noy
+
+
 class HybridSolver2D:
     """
     The fluid solver that replaces Stable Fluids' advection process with PIC/APIC in 2D.
@@ -78,10 +86,10 @@ class HybridSolver2D:
         self.boundary_ = 2
 
         # FLIP/PIC blend rate
-        self.blend_ = 0.8
+        self.blend_ = 0.95
 
         # The number of iterations for the projection step
-        self.n_project_ = 32
+        self.n_project_ = 64
 
         # The damping factor for the damped Jacobi iteration
         self.damping_ = 0.64
@@ -229,28 +237,7 @@ class HybridSolver2D:
         i = wp.tid()
 
         up = wp.vec2(u[i].x, u[i].y)
-        pp = wp.vec2(p[i].x, p[i].y)
-
-        # Calculate the corresponding grid position of this particle,
-        base = wp.vec2(wp.floor(pp.x), wp.floor(pp.y)) + wp.vec2(0.5, 0.5)
-        ox = wp.vec3(pp.x - (base.x - 1.0), pp.x -
-                     (base.x), pp.x - (base.x + 1.0))
-        oy = wp.vec3(pp.y - (base.y - 1.0), pp.y -
-                     (base.y), pp.y - (base.y + 1.0))
-
-        # Fuck WARP
-        ox.x = wp.abs(ox.x)
-        ox.y = wp.abs(ox.y)
-        ox.z = wp.abs(ox.z)
-        oy.x = wp.abs(oy.x)
-        oy.y = wp.abs(oy.y)
-        oy.z = wp.abs(oy.z)
-
-        # Quadratic B-spline kernel
-        nox = wp.vec3(0.5*(1.5-ox.x)*(1.5-ox.x), 0.75 -
-                      ox.y*ox.y, 0.5*(1.5-ox.z)*(1.5-ox.z))
-        noy = wp.vec3(0.5*(1.5-oy.x)*(1.5-oy.x), 0.75 -
-                      oy.y*oy.y, 0.5*(1.5-oy.z)*(1.5-oy.z))
+        base, nox, noy = get_bspline_coeff(p[i])
 
         # Accumulate the velocity from particles to grid
         for x in range(3):
@@ -307,10 +294,10 @@ class HybridSolver2D:
         #
         # Divergence of the velocity field with boundary correction.
         # Since boundary cells are set to zero, we can skip them.
-        d = get_at_position(wp.vec2(float(i+1), float(j)), u).x - \
-            get_at_position(wp.vec2(float(i-1), float(j)), u).x + \
-            get_at_position(wp.vec2(float(i), float(j+1)), u).y - \
-            get_at_position(wp.vec2(float(i), float(j-1)), u).y
+        d = get_at_position(i+1, j, u).x -  \
+            get_at_position(i-1, j, u).x + \
+            get_at_position(i, j+1, u).y -  \
+            get_at_position(i, j-1, u).y
 
         div[i, j] = d / 2.0
 
@@ -347,16 +334,16 @@ class HybridSolver2D:
         valid_counter = int(0)
 
         if not is_solid(i+1, j, f):
-            q_nearby += get_q_at_position(wp.vec2(float(i+1), float(j)), q_src)
+            q_nearby += get_at_position(i+1, j, q_src)
             valid_counter += 1
         if not is_solid(i-1, j, f):
-            q_nearby += get_q_at_position(wp.vec2(float(i-1), float(j)), q_src)
+            q_nearby += get_at_position(i-1, j, q_src)
             valid_counter += 1
         if not is_solid(i, j+1, f):
-            q_nearby += get_q_at_position(wp.vec2(float(i), float(j+1)), q_src)
+            q_nearby += get_at_position(i, j+1, q_src)
             valid_counter += 1
         if not is_solid(i, j-1, f):
-            q_nearby += get_q_at_position(wp.vec2(float(i), float(j-1)), q_src)
+            q_nearby += get_at_position(i, j-1, q_src)
             valid_counter += 1
 
         q_dst[i, j] = (1.0 - damping)*q_src[i, j] + \
@@ -397,34 +384,9 @@ class HybridSolver2D:
         boundary: int,
     ) -> None:
         i = wp.tid()
-        pp = wp.vec2(p[i].x, p[i].y)
 
         # Calculate the corresponding grid position of this particle,
-        base = wp.vec2(wp.floor(pp.x), wp.floor(pp.y)) + wp.vec2(0.5, 0.5)
-        ox = wp.vec3(pp.x - (base.x - 1.0), pp.x -
-                     (base.x), pp.x - (base.x + 1.0))
-        oy = wp.vec3(pp.y - (base.y - 1.0), pp.y -
-                     (base.y), pp.y - (base.y + 1.0))
-
-        # Fuck WARP
-        ox.x = wp.abs(ox.x)
-        ox.y = wp.abs(ox.y)
-        ox.z = wp.abs(ox.z)
-        oy.x = wp.abs(oy.x)
-        oy.y = wp.abs(oy.y)
-        oy.z = wp.abs(oy.z)
-
-        # Quadratic B-spline kernel
-        nox = wp.vec3(0.5*(1.5-ox.x)*(1.5-ox.x), 0.75 -
-                      ox.y*ox.y, 0.5*(1.5-ox.z)*(1.5-ox.z))
-        noy = wp.vec3(0.5*(1.5-oy.x)*(1.5-oy.x), 0.75 -
-                      oy.y*oy.y, 0.5*(1.5-oy.z)*(1.5-oy.z))
-
-        # Quadratic B-spline kernel
-        nox = wp.vec3(0.5*(1.5-ox.x)*(1.5-ox.x), 0.75 -
-                      ox.y*ox.y, 0.5*(1.5-ox.z)*(1.5-ox.z))
-        noy = wp.vec3(0.5*(1.5-oy.x)*(1.5-oy.x), 0.75 -
-                      oy.y*oy.y, 0.5*(1.5-oy.z)*(1.5-oy.z))
+        base, nox, noy = get_bspline_coeff(p[i])
 
         # Create the accumulator for the velocity
         vel_pic = wp.vec2(0.0, 0.0)
@@ -443,9 +405,13 @@ class HybridSolver2D:
                 vel_pic += coeff * ug[bi, bj]
                 vel_flip += coeff * (ug[bi, bj] - ug_prev[bi, bj])
 
-        # Update the velocity of this particle
         # Particle boundary conditions
         vel = (1.0 - blend) * vel_pic + blend * vel_flip
+
+        # Dimensionless time scaling, T* = L* / 1e5 (this, and the gravity
+        # constant, are the only two parameters in the simulation).
+        # Suppose we are simulating a 1m x 1m box, while L* = 500, then T* = 5e-3.
+        # 64 frames gives us 0.32s of physical time.
         pos = p[i] + vel * 1e-5
         for j in range(2):
             if pos[j] < float(boundary):
@@ -454,6 +420,8 @@ class HybridSolver2D:
             if pos[j] > float(ug.shape[j] - boundary):
                 pos[j] = float(ug.shape[j] - boundary) - 1e-3
                 vel[j] = 0.0
+
+        # Update the position/velocity of this particle
         p[i] = pos
         u[i] = vel
 
@@ -464,9 +432,7 @@ if __name__ == '__main__':
 
     gui = ti.GUI("PIC/FLIP", (solver.width_*2,
                  solver.height_*2), background_color=0x212121)
-    frame_id = 0
     while gui.running:
         solver.anim_frame_particle(n_steps=32)
-        gui.circles(solver.pn_ / res, radius=1.3, color=0x0288D1)
-        gui.show(file=f'flip/frame_{frame_id:04d}.png')
-        frame_id += 1
+        gui.circles(solver.pn_ / res, radius=1.6, color=0x0288D1)
+        gui.show()
