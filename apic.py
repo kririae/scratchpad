@@ -77,7 +77,7 @@ class HybridSolver2D:
     The fluid solver that replaces Stable Fluids' advection process with PIC/APIC in 2D.
     """
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, use_apic: bool = True) -> None:
         wp.init()
 
         self.width_ = width
@@ -87,9 +87,10 @@ class HybridSolver2D:
 
         # FLIP/PIC blend rate
         self.blend_ = 0.95
+        self.use_apic = use_apic
 
         # The number of iterations for the projection step
-        self.n_project_ = 64
+        self.n_project_ = 32
 
         # The damping factor for the damped Jacobi iteration
         self.damping_ = 0.64
@@ -97,6 +98,7 @@ class HybridSolver2D:
         # Particle positions and velocities
         self.p_ = wp.from_numpy(self._init(), dtype=wp.vec2, device="cuda")
         self.u_ = wp.zeros(self.p_.shape, dtype=wp.vec2)
+        self.c_ = wp.zeros(self.p_.shape, dtype=wp.mat22)
 
         # Particles positions as a numpy array for rendering
         self.pn_ = self.p_.numpy()
@@ -139,12 +141,13 @@ class HybridSolver2D:
         np.copyto(self.pn_, self.p_.numpy())
 
     def _init(self) -> np.ndarray:
-        points_x = np.linspace(0.25, 0.75, 500) * self.width_
-        points_y = np.linspace(0.30, 0.80, 500) * self.height_
+        points_x = np.linspace(0.30, 0.70, 800) * self.width_
+        points_y = np.linspace(0.30, 0.70, 800) * self.height_
         density = (500 / (np.max(points_y) - np.min(points_y)))**2
         print(f'average density: {density}')
         grid_x, grid_y = np.meshgrid(points_x, points_y)
-        return np.vstack((grid_x.flatten(), grid_y.flatten())).T
+        res = np.vstack((grid_x.flatten(), grid_y.flatten())).T
+        return res + np.random.rand(*res.shape) - 0.5
 
     def _init_grid(self) -> None:
         self.fg_.fill_(GAS)
@@ -159,11 +162,19 @@ class HybridSolver2D:
     def _p2g(self) -> None:
         self.ug_.fill_(0.0)
         self.mg_.fill_(0.0)
-        wp.launch(self._p2g_kernel, dim=self.p_.shape[0],
-                  inputs=[self.u_,
-                          self.p_,
-                          self.ug_,
-                          self.mg_])
+        if self.use_apic:
+            wp.launch(self._p2g_apic_kernel, dim=self.p_.shape[0],
+                      inputs=[self.u_,
+                              self.p_,
+                              self.c_,
+                              self.ug_,
+                              self.mg_])
+        else:
+            wp.launch(self._p2g_kernel, dim=self.p_.shape[0],
+                      inputs=[self.u_,
+                              self.p_,
+                              self.ug_,
+                              self.mg_])
         wp.launch(self._p2g_postprocess_kernel, dim=self.shape_,
                   inputs=[self.ug_, self.mg_])
 
@@ -192,13 +203,16 @@ class HybridSolver2D:
                           self.fg_,])
 
     def _g2p(self) -> None:
-        wp.launch(self._g2p_kernel, dim=self.p_.shape[0],
-                  inputs=[self.u_,
-                          self.p_,
-                          self.ug_,
-                          self.ug_prev_,
-                          self.blend_,
-                          self.boundary_,])
+        if self.use_apic:
+            wp.launch(self._g2p_apic_kernel, dim=self.p_.shape[0],
+                      inputs=[self.u_, self.p_, self.c_,
+                              self.ug_,
+                              self.boundary_,])
+        else:
+            wp.launch(self._g2p_kernel, dim=self.p_.shape[0],
+                      inputs=[self.u_, self.p_,
+                              self.ug_, self.ug_prev_,
+                              self.blend_, self.boundary_,])
 
     @wp.kernel
     def _init_grid_kernel(fg: wp.array2d(dtype=wp.uint8), boundary: int) -> None:
@@ -221,7 +235,7 @@ class HybridSolver2D:
         fg: wp.array2d(dtype=wp.uint8),
     ) -> None:
         i = wp.tid()
-        pp = wp.vec2(p[i].x, p[i].y)
+        pp = p[i]
         base = wp.vec2(wp.floor(pp.x), wp.floor(pp.y))
 
         if fg[int(base.x), int(base.y)] != SOLID:
@@ -236,7 +250,7 @@ class HybridSolver2D:
     ) -> None:
         i = wp.tid()
 
-        up = wp.vec2(u[i].x, u[i].y)
+        up = u[i]
         base, nox, noy = get_bspline_coeff(p[i])
 
         # Accumulate the velocity from particles to grid
@@ -250,6 +264,34 @@ class HybridSolver2D:
 
                 coeff = nox[x] * noy[y]
                 wp.atomic_add(ug, bi, bj, coeff * up)
+                wp.atomic_add(mg, bi, bj, coeff)
+
+    @wp.kernel
+    def _p2g_apic_kernel(
+        u: wp.array1d(dtype=wp.vec2),
+        p: wp.array1d(dtype=wp.vec2),
+        c: wp.array1d(dtype=wp.mat22),
+        ug: wp.array2d(dtype=wp.vec2),
+        mg: wp.array2d(dtype=wp.float32),
+    ) -> None:
+        i = wp.tid()
+
+        up = u[i]
+        pp = p[i]
+        affine = c[i]
+        base, nox, noy = get_bspline_coeff(p[i])
+
+        for x in range(3):
+            for y in range(3):
+                bi = int(base.x) - 1 + x
+                bj = int(base.y) - 1 + y
+
+                if bi < 0 or bi >= ug.shape[0] or bj < 0 or bj >= ug.shape[1]:
+                    continue
+
+                dpos = pp - wp.vec2(float(bi) + 0.5, float(bj) + 0.5)
+                coeff = nox[x] * noy[y]
+                wp.atomic_add(ug, bi, bj, coeff * (up + affine @ dpos))
                 wp.atomic_add(mg, bi, bj, coeff)
 
     @wp.kernel
@@ -425,14 +467,59 @@ class HybridSolver2D:
         p[i] = pos
         u[i] = vel
 
+    @wp.kernel
+    def _g2p_apic_kernel(
+        u: wp.array1d(dtype=wp.vec2),
+        p: wp.array1d(dtype=wp.vec2),
+        c: wp.array1d(dtype=wp.mat22),
+        ug: wp.array2d(dtype=wp.vec2),
+        boundary: int,
+    ) -> None:
+        i = wp.tid()
+
+        pp = p[i]
+        base, nox, noy = get_bspline_coeff(pp)
+        vel = wp.vec2(0.0, 0.0)
+        aff = wp.mat22(0.0)
+
+        for x in range(3):
+            for y in range(3):
+                bi = int(base.x) - 1 + x
+                bj = int(base.y) - 1 + y
+
+                if bi < 0 or bi >= ug.shape[0] or bj < 0 or bj >= ug.shape[1]:
+                    continue
+
+                ug_temp = ug[bi, bj]
+                dpos = pp - wp.vec2(float(bi) + 0.5, float(bj) + 0.5)
+                coeff = nox[x] * noy[y]
+
+                vel += coeff * ug_temp
+                aff += coeff * 4.0 * wp.outer(ug_temp, dpos)
+
+        pos = p[i] + vel * 1e-5
+        for j in range(2):
+            if pos[j] < float(boundary):
+                pos[j] = float(boundary) + 1e-3
+                vel[j] = 0.0
+            if pos[j] > float(ug.shape[j] - boundary):
+                pos[j] = float(ug.shape[j] - boundary) - 1e-3
+                vel[j] = 0.0
+
+        p[i] = pos
+        u[i] = vel
+        c[i] = aff
+
 
 if __name__ == '__main__':
     res = 512
-    solver = HybridSolver2D(res, res)
+    solver = HybridSolver2D(res, res, use_apic=True)
 
-    gui = ti.GUI("PIC/FLIP", (solver.width_*2,
+    gui = ti.GUI("PIC/FLIP/APIC", (solver.width_*2,
                  solver.height_*2), background_color=0x212121)
+    frame_id = 0
     while gui.running:
-        solver.anim_frame_particle(n_steps=32)
-        gui.circles(solver.pn_ / res, radius=1.6, color=0x0288D1)
+        solver.anim_frame_particle(n_steps=16)
+        gui.circles(solver.pn_ / res, radius=1.0, color=0x0288D1)
         gui.show()
+        frame_id += 1
