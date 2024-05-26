@@ -11,20 +11,21 @@ GAS = wp.constant(wp.uint8(2))
 
 
 @wp.func
+def is_inside(i: int, j: int, width: Any, height: Any) -> bool:
+    return float(i) >= 0 and float(i) < float(width) and float(j) >= 0 and float(j) < float(height)
+
+
+@wp.func
 def get_at_position(
     i: int,
     j: int,
     f: wp.array2d(dtype=Any),
 ) -> Any:
     width, height = f.shape[0], f.shape[1]
-    i = wp.clamp(i, 0, width - 1)
-    j = wp.clamp(j, 0, height - 1)
-    return f[i, j]
-
-
-@wp.func
-def is_inside(i: int, j: int, width: Any, height: Any) -> bool:
-    return float(i) >= 0 and float(i) < float(width) and float(j) >= 0 and float(j) < float(height)
+    if is_inside(i, j, width, height):
+        return f[i, j]
+    else:
+        return type(f[0, 0])(0.0)
 
 
 @wp.func
@@ -50,6 +51,8 @@ def is_gas(i: int, j: int, f: wp.array2d(dtype=wp.uint8)) -> bool:
 
 @wp.func
 def get_bspline_coeff(p: wp.vec2):
+    # This implementation sticks to cell-centered grid, where both pressure and
+    # velocity are stored at the center of the cell.
     # Calculate the corresponding grid position of this particle,
     base = wp.vec2(wp.floor(p.x), wp.floor(p.y)) + wp.vec2(0.5, 0.5)
     ox = wp.vec3(p.x - (base.x - 1.0), p.x - (base.x), p.x - (base.x + 1.0))
@@ -72,7 +75,7 @@ def get_bspline_coeff(p: wp.vec2):
     return base, nox, noy
 
 
-class HybridSolver2D:
+class AffineParticleInCellSolver2D:
     """
     The fluid solver that replaces Stable Fluids' advection process with PIC/APIC in 2D.
     """
@@ -83,10 +86,10 @@ class HybridSolver2D:
         self.width_ = width
         self.height_ = height
         self.shape_ = (width, height)
-        self.boundary_ = 2
+        self.boundary_ = 5
 
         # FLIP/PIC blend rate
-        self.blend_ = 0.95
+        self.blend_ = 0.99
         self.use_apic = use_apic
 
         # The number of iterations for the projection step
@@ -105,6 +108,9 @@ class HybridSolver2D:
 
         # Grid velocities
         self.ug_ = wp.zeros((width, height), dtype=wp.vec2)
+
+        self.ug0_ = wp.zeros((width, height), dtype=wp.vec2)
+        self.ug1_ = wp.zeros((width, height), dtype=wp.vec2)
         self.ug_prev_ = wp.zeros((width, height), dtype=wp.vec2)
 
         self.mg_ = wp.zeros((width, height), dtype=wp.float32)
@@ -130,7 +136,8 @@ class HybridSolver2D:
         with wp.ScopedTimer("step"):
             self._set_flag()
             self._p2g()
-            self.ug_prev_.assign(self.ug_)
+            if not self.use_apic:
+                self.ug_prev_.assign(self.ug_)
             self._g_project()
             self._g2p()
             wp.synchronize()
@@ -176,7 +183,7 @@ class HybridSolver2D:
                               self.ug_,
                               self.mg_])
         wp.launch(self._p2g_postprocess_kernel, dim=self.shape_,
-                  inputs=[self.ug_, self.mg_])
+                  inputs=[self.ug_, self.mg_, self.fg_])
 
     def _g_project_iter(self) -> None:
         for _ in range(self.n_project_):
@@ -192,15 +199,23 @@ class HybridSolver2D:
         self.div_.fill_(0.0)
         wp.launch(self._g_force_and_boundary_kernel,
                   dim=self.shape_, inputs=[self.ug_, self.fg_])
+        self.ug0_.assign(self.ug_)
+        # This method is not stable enough
+        if False:
+            for _ in range(128):
+                wp.launch(self._g_diffuse_kernel, dim=self.shape_, inputs=[
+                    self.ug0_, self.ug1_, self.ug_, self.fg_, 10.0])
+                (self.ug0_, self.ug1_) = (self.ug1_, self.ug0_)
         wp.launch(self._g_calc_divergence, dim=self.shape_, inputs=[
-                  self.ug_, self.div_, self.fg_])
+                  self.ug0_, self.div_, self.fg_])
         wp.launch(self._g_precondition, dim=self.shape_,
                   inputs=[self.j0_, self.fg_])
         wp.capture_launch(self.project_graph_)
         wp.launch(self._g_subtract_gradient_q_kernel, dim=self.shape_,
-                  inputs=[self.ug_,
+                  inputs=[self.ug0_,
                           self.j0_,
                           self.fg_,])
+        self.ug_.assign(self.ug0_)
 
     def _g2p(self) -> None:
         if self.use_apic:
@@ -218,7 +233,7 @@ class HybridSolver2D:
     def _init_grid_kernel(fg: wp.array2d(dtype=wp.uint8), boundary: int) -> None:
         i, j = wp.tid()
         width, height = fg.shape[0], fg.shape[1]
-        if (i <= boundary or i >= width - boundary - 1) or (j <= boundary or j >= height - boundary - 1):
+        if (i < boundary or i >= width - boundary) or (j < boundary or j >= height - boundary):
             fg[i, j] = SOLID
 
     @wp.kernel
@@ -298,11 +313,15 @@ class HybridSolver2D:
     def _p2g_postprocess_kernel(
         ug: wp.array2d(dtype=wp.vec2),
         mg: wp.array2d(dtype=wp.float32),
+        fg: wp.array2d(dtype=wp.uint8),
     ) -> None:
         i, j = wp.tid()
 
         if mg[i, j] > 0:
             ug[i, j] /= mg[i, j]
+
+        if is_solid(i, j, fg):
+            ug[i, j] = wp.vec2(0.0)
 
     @wp.kernel
     def _g_force_and_boundary_kernel(
@@ -311,14 +330,48 @@ class HybridSolver2D:
     ) -> None:
         i, j = wp.tid()
 
-        # Apply gravity
-        ug[i, j] += wp.vec2(0.0, -9.8)
-
         # Apply slip boundary conditions
         if is_solid(i, j, fg) or is_solid(i-1, j, fg) or is_solid(i+1, j, fg):
             ug[i, j].x = 0.0
         if is_solid(i, j, fg) or is_solid(i, j-1, fg) or is_solid(i, j+1, fg):
             ug[i, j].y = 0.0
+
+        # Apply gravity
+        if not is_solid(i, j, fg):
+            ug[i, j] += wp.vec2(0.0, -9.8)
+
+    @wp.kernel
+    def _g_diffuse_kernel(
+        u_src: wp.array2d(dtype=wp.vec2),
+        u_dst: wp.array2d(dtype=wp.vec2),
+        b: wp.array2d(dtype=wp.vec2),
+        f: wp.array2d(dtype=wp.uint8),
+        viscosity: float,
+    ) -> None:
+        i, j = wp.tid()
+
+        if not is_water(i, j, f):
+            u_dst[i, j] = b[i, j]
+            return
+
+        u_nearby = wp.vec2(0.0, 0.0)
+        valid_counter = int(0)
+
+        if not is_solid(i-1, j, f):
+            u_nearby += get_at_position(i-1, j, u_src)
+            valid_counter += 1
+        if not is_solid(i+1, j, f):
+            u_nearby += get_at_position(i+1, j, u_src)
+            valid_counter += 1
+        if not is_solid(i, j-1, f):
+            u_nearby += get_at_position(i, j-1, u_src)
+            valid_counter += 1
+        if not is_solid(i, j+1, f):
+            u_nearby += get_at_position(i, j+1, u_src)
+            valid_counter += 1
+
+        u_dst[i, j] = (b[i, j] + u_nearby * viscosity) / \
+            (1.0 + float(valid_counter)*viscosity)
 
     @wp.kernel
     def _g_calc_divergence(
@@ -336,12 +389,22 @@ class HybridSolver2D:
         #
         # Divergence of the velocity field with boundary correction.
         # Since boundary cells are set to zero, we can skip them.
-        d = get_at_position(i+1, j, u).x -  \
-            get_at_position(i-1, j, u).x + \
-            get_at_position(i, j+1, u).y -  \
-            get_at_position(i, j-1, u).y
-
-        div[i, j] = d / 2.0
+        # we use the equation from [Kumar 2004, Isotropic finite-differences].
+        u1 = get_at_position(i+1, j+0, u)
+        u2 = get_at_position(i+0, j+1, u)
+        u3 = get_at_position(i-1, j+0, u)
+        u4 = get_at_position(i+0, j-1, u)
+        u5 = get_at_position(i+1, j+1, u)
+        u6 = get_at_position(i-1, j+1, u)
+        u7 = get_at_position(i-1, j-1, u)
+        u8 = get_at_position(i+1, j-1, u)
+        c1o6 = 1.0 / 6.0
+        c4o6 = 4.0 / 6.0
+        pu0px = (c1o6 * (u5.x - u6.x) + c4o6 *
+                 (u1.x - u3.x) + c1o6 * (u8.x - u7.x)) / 2.0
+        pu1py = (c1o6 * (u6.y - u7.y) + c4o6 *
+                 (u2.y - u4.y) + c1o6 * (u5.y - u8.y)) / 2.0
+        div[i, j] = pu0px + pu1py
 
     @wp.kernel
     def _g_precondition(
@@ -404,6 +467,7 @@ class HybridSolver2D:
         # Graphics, Figure 5.2].
         #
         # Poisson pressure gradient update.
+        # Central difference gradient calculation is used.
         if is_water(i+1, j, f) or is_water(i-1, j, f):
             if is_solid(i+1, j, f) or is_solid(i-1, j, f):
                 u[i, j].x = 0.0
@@ -502,8 +566,8 @@ class HybridSolver2D:
             if pos[j] < float(boundary):
                 pos[j] = float(boundary) + 1e-3
                 vel[j] = 0.0
-            if pos[j] > float(ug.shape[j] - boundary):
-                pos[j] = float(ug.shape[j] - boundary) - 1e-3
+            if pos[j] >= float(ug.shape[j] - boundary):
+                pos[j] = float(ug.shape[j] - boundary) + 1e-3
                 vel[j] = 0.0
 
         p[i] = pos
@@ -513,7 +577,7 @@ class HybridSolver2D:
 
 if __name__ == '__main__':
     res = 512
-    solver = HybridSolver2D(res, res, use_apic=True)
+    solver = AffineParticleInCellSolver2D(res, res, use_apic=True)
 
     gui = ti.GUI("PIC/FLIP/APIC", (solver.width_*2,
                  solver.height_*2), background_color=0x212121)

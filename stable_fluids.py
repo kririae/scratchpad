@@ -286,7 +286,7 @@ class StableFluidSolver2D:
 
 
 if __name__ == '__main__':
-    solver = StableFluidSolver2D(512, 512, 0.00001)
+    solver = StableFluidSolver2D(512, 512, 1.0)
 
     fig = plt.figure()
     img = plt.imshow(solver.um_.numpy(), origin='lower',
