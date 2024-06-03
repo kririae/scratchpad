@@ -95,9 +95,10 @@ class AffineParticleInCellSolver3D:
         self.boundary_ = 5
 
         self.viscosity_ = viscosity
+        self.dt_ = 1e-4
 
         self.n_diffuse_ = 32  # not used
-        self.n_project_ = 64
+        self.n_project_ = 256
         self.damping_ = 0.64
 
         self.p_ = wp.from_numpy(self._init(), dtype=wp.vec3, device="cuda")
@@ -140,9 +141,9 @@ class AffineParticleInCellSolver3D:
         np.copyto(self.pn_, self.p_.numpy())
 
     def _init(self) -> np.ndarray:
-        points_x = np.linspace(0.02, 0.17, 80) * self.length_
-        points_y = np.linspace(0.05, 0.65, 160) * self.width_
-        points_z = np.linspace(0.05, 0.95, 250) * self.height_
+        points_x = np.linspace(0.025, 0.20, 140) * self.length_
+        points_y = np.linspace(0.05, 0.55, 200) * self.width_
+        points_z = np.linspace(0.05, 0.95, 360) * self.height_
         grid_x, grid_y, grid_z = np.meshgrid(points_x, points_y, points_z)
         res = np.vstack(
             (grid_x.flatten(), grid_y.flatten(), grid_z.flatten())).T
@@ -193,7 +194,7 @@ class AffineParticleInCellSolver3D:
     def _g_project(self) -> None:
         self.div_.fill_(0.0)
         wp.launch(self._g_force_and_boundary_kernel,
-                  dim=self.shape_, inputs=[self.ug_, self.fg_, self.boundary_])
+                  dim=self.shape_, inputs=[self.ug_, self.fg_, self.boundary_, self.dt_])
         if False:
             # IDK if this is correct, so disable it for now
             wp.capture_launch(self.diffuse_graph_)
@@ -214,7 +215,7 @@ class AffineParticleInCellSolver3D:
         wp.launch(self._g2p_apic_kernel, dim=self.p_.shape[0],
                   inputs=[self.u_, self.p_, self.c_,
                           self.ug_,
-                          self.boundary_,])
+                          self.boundary_, self.dt_,])
 
     @wp.kernel
     def _init_grid_kernel(fg: wp.array3d(dtype=wp.uint8), boundary: int) -> None:
@@ -270,8 +271,8 @@ class AffineParticleInCellSolver3D:
                     if bi < 0 or bi >= ug.shape[0] or bj < 0 or bj >= ug.shape[1] or bk < 0 or bk >= ug.shape[2]:
                         continue
 
-                    dpos = pp - wp.vec3(float(bi) + 0.5,
-                                        float(bj) + 0.5, float(bk) + 0.5)
+                    dpos = wp.vec3(float(bi) + 0.5, float(bj) +
+                                   0.5, float(bk) + 0.5) - pp
                     coeff = nox[x] * noy[y] * noz[z]
                     wp.atomic_add(ug, bi, bj, bk, coeff * (up + affine @ dpos))
                     wp.atomic_add(mg, bi, bj, bk, coeff)
@@ -295,8 +296,12 @@ class AffineParticleInCellSolver3D:
         ug: wp.array3d(dtype=wp.vec3),
         fg: wp.array3d(dtype=wp.uint8),
         boundary: int,
+        dt: float,
     ) -> None:
         i, j, k = wp.tid()
+
+        if not is_solid(i, j, k, fg):
+            ug[i, j, k] += wp.vec3(0.0, -15680.0, 0.0) * dt
 
         if is_solid(i, j, k, fg) or is_solid(i-1, j, k, fg) or is_solid(i+1, j, k, fg):
             ug[i, j, k].x = 0.0
@@ -304,9 +309,6 @@ class AffineParticleInCellSolver3D:
             ug[i, j, k].y = 0.0
         if is_solid(i, j, k, fg) or is_solid(i, j, k+1, fg) or is_solid(i, j, k-1, fg):
             ug[i, j, k].z = 0.0
-
-        if not is_solid(i, j, k, fg):
-            ug[i, j, k] += wp.vec3(0.0, -9.8, 0.0) / 10.0
 
     @wp.kernel
     def _g_diffuse_kernel(
@@ -449,6 +451,7 @@ class AffineParticleInCellSolver3D:
         c: wp.array1d(dtype=wp.mat33),
         ug: wp.array3d(dtype=wp.vec3),
         boundary: int,
+        dt: float,
     ) -> None:
         i = wp.tid()
 
@@ -468,21 +471,20 @@ class AffineParticleInCellSolver3D:
                         continue
 
                     ug_temp = ug[bi, bj, bk]
-                    dpos = pp - wp.vec3(float(bi) + 0.5,
-                                        float(bj) + 0.5, float(bk) + 0.5)
+                    dpos = wp.vec3(float(bi) + 0.5, float(bj) + 0.5, float(bk) + 0.5) - pp
                     coeff = nox[x] * noy[y] * noz[z]
 
                     vel += coeff * ug_temp
                     aff += coeff * 4.0 * wp.outer(ug_temp, dpos)
 
-        pos = p[i] + vel * 1e-4
+        pos = p[i] + vel * dt
         for j in range(3):
             if pos[j] < float(boundary):
-                pos[j] = float(boundary) + 1e-2
-                vel[j] = max(-vel[j], 10.0)
+                pos[j] = float(boundary) + 1e-1
+                vel[j] = 0.0
             if pos[j] > float(ug.shape[j] - boundary):
-                pos[j] = float(ug.shape[j] - boundary) - 1e-2
-                vel[j] = min(-vel[j], -10.0)
+                pos[j] = float(ug.shape[j] - boundary) - 1e-1
+                vel[j] = 0.0
 
         p[i] = pos
         u[i] = vel
@@ -490,8 +492,8 @@ class AffineParticleInCellSolver3D:
 
 
 if __name__ == '__main__':
-    res = 160
-    solver = AffineParticleInCellSolver3D(res*2, res, res)
+    res = 200
+    solver = AffineParticleInCellSolver3D(400, 200, 200)
 
     renderer = wp.render.OpenGLRenderer(
         camera_pos=(1.0, 0.8, 3.5),
@@ -499,17 +501,16 @@ if __name__ == '__main__':
         draw_axis=False,
         vsync=False)
 
-    for _ in range(512):
-        solver.anim_frame(n_steps=32)
+    for _ in range(128):
+        solver.anim_frame(n_steps=256)
         time = renderer.clock_time
         renderer.begin_frame(time)
         arr = solver.pn_ / res
         renderer.render_points(
-            name='particles', points=arr, radius=0.003)
+            name='particles', points=arr, radius=0.002)
         renderer.end_frame()
 
         # Save numpy array
-        if False:
-            with open(f'archive/p_{_}.npz', 'wb') as f:
-                print(f'saving frame {_}...')
-                np.savez(f, arr)
+        with open(f'archive3/p_{_}.npz', 'wb') as f:
+            print(f'saving frame {_}...')
+            np.savez(f, arr)

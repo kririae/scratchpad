@@ -2,7 +2,7 @@
 
 import numpy as np
 
-npz_file_path = 'archive/p_255.npz'
+npz_file_path = 'archive3/p_17.npz'
 xyz_file_path = 'fluid.xyz'
 
 data = np.load(npz_file_path)
