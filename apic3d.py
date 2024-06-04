@@ -98,7 +98,7 @@ class AffineParticleInCellSolver3D:
         self.dt_ = 1e-4
 
         self.n_diffuse_ = 32  # not used
-        self.n_project_ = 256
+        self.n_project_ = 32
         self.damping_ = 0.64
 
         self.p_ = wp.from_numpy(self._init(), dtype=wp.vec3, device="cuda")
@@ -141,9 +141,9 @@ class AffineParticleInCellSolver3D:
         np.copyto(self.pn_, self.p_.numpy())
 
     def _init(self) -> np.ndarray:
-        points_x = np.linspace(0.025, 0.20, 140) * self.length_
-        points_y = np.linspace(0.05, 0.55, 200) * self.width_
-        points_z = np.linspace(0.05, 0.95, 360) * self.height_
+        points_x = np.linspace(0.01, 0.31, int(240/1.2)) * self.length_
+        points_y = np.linspace(0.05, 0.55, int(200/1.2)) * self.width_
+        points_z = np.linspace(0.05, 0.95, int(360/1.2)) * self.height_
         grid_x, grid_y, grid_z = np.meshgrid(points_x, points_y, points_z)
         res = np.vstack(
             (grid_x.flatten(), grid_y.flatten(), grid_z.flatten())).T
@@ -303,12 +303,21 @@ class AffineParticleInCellSolver3D:
         if not is_solid(i, j, k, fg):
             ug[i, j, k] += wp.vec3(0.0, -15680.0, 0.0) * dt
 
-        if is_solid(i, j, k, fg) or is_solid(i-1, j, k, fg) or is_solid(i+1, j, k, fg):
-            ug[i, j, k].x = 0.0
-        if is_solid(i, j, k, fg) or is_solid(i, j-1, k, fg) or is_solid(i, j+1, k, fg):
-            ug[i, j, k].y = 0.0
-        if is_solid(i, j, k, fg) or is_solid(i, j, k+1, fg) or is_solid(i, j, k-1, fg):
-            ug[i, j, k].z = 0.0
+        if is_water(i, j, k, fg):
+            n = wp.vec3(0.0)
+            if is_solid(i+1, j, k, fg):
+                n += wp.vec3(-1.0, 0.0, 0.0)
+            if is_solid(i-1, j, k, fg):
+                n += wp.vec3(1.0, 0.0, 0.0)
+            if is_solid(i, j+1, k, fg):
+                n += wp.vec3(0.0, -1.0, 0.0)
+            if is_solid(i, j-1, k, fg):
+                n += wp.vec3(0.0, 1.0, 0.0)
+            if is_solid(i, j, k+1, fg):
+                n += wp.vec3(0.0, 0.0, -1.0)
+            if is_solid(i, j, k-1, fg):
+                n += wp.vec3(0.0, 0.0, 1.0)
+            ug[i, j, k] = ug[i, j, k] - n*wp.min(wp.dot(n, ug[i, j, k]), 0.0)
 
     @wp.kernel
     def _g_diffuse_kernel(
@@ -471,7 +480,8 @@ class AffineParticleInCellSolver3D:
                         continue
 
                     ug_temp = ug[bi, bj, bk]
-                    dpos = wp.vec3(float(bi) + 0.5, float(bj) + 0.5, float(bk) + 0.5) - pp
+                    dpos = wp.vec3(float(bi) + 0.5, float(bj) +
+                                   0.5, float(bk) + 0.5) - pp
                     coeff = nox[x] * noy[y] * noz[z]
 
                     vel += coeff * ug_temp
@@ -479,13 +489,8 @@ class AffineParticleInCellSolver3D:
 
         pos = p[i] + vel * dt
         for j in range(3):
-            if pos[j] < float(boundary):
-                pos[j] = float(boundary) + 1e-1
-                vel[j] = 0.0
-            if pos[j] > float(ug.shape[j] - boundary):
-                pos[j] = float(ug.shape[j] - boundary) - 1e-1
-                vel[j] = 0.0
-
+            pos[j] = wp.clamp(pos[j], float(boundary),
+                              float(ug.shape[j] - boundary))
         p[i] = pos
         u[i] = vel
         c[i] = aff
@@ -495,22 +500,22 @@ if __name__ == '__main__':
     res = 200
     solver = AffineParticleInCellSolver3D(400, 200, 200)
 
-    renderer = wp.render.OpenGLRenderer(
-        camera_pos=(1.0, 0.8, 3.5),
-        draw_sky=False,
-        draw_axis=False,
-        vsync=False)
+    # renderer = wp.render.OpenGLRenderer(
+    #     camera_pos=(1.0, 0.8, 3.5),
+    #     draw_sky=False,
+    #     draw_axis=False,
+    #     vsync=False)
 
     for _ in range(128):
-        solver.anim_frame(n_steps=256)
-        time = renderer.clock_time
-        renderer.begin_frame(time)
+        solver.anim_frame(n_steps=128)
+        # time = renderer.clock_time
+        # renderer.begin_frame(time)
         arr = solver.pn_ / res
-        renderer.render_points(
-            name='particles', points=arr, radius=0.002)
-        renderer.end_frame()
+        # renderer.render_points(
+        #     name='particles', points=arr, radius=0.002)
+        # renderer.end_frame()
 
         # Save numpy array
-        with open(f'archive3/p_{_}.npz', 'wb') as f:
+        with open(f'archive4/p_{_}.npz', 'wb') as f:
             print(f'saving frame {_}...')
             np.savez(f, arr)

@@ -149,6 +149,30 @@ class MaterialPointSolver2D:
 
     def to_fluid(self):
         self.f_.fill_(WATER)
+        self.J_.fill_(1.0)
+        wp.synchronize()
+
+    def exchange(self):
+        wp.launch(self._swap_kernel, dim=self.p_.shape[0], inputs=[
+                  self.u_, self.f_, self.J_, self.F_])
+
+    @wp.kernel
+    def _swap_kernel(
+        u: wp.array1d(dtype=wp.vec2),
+        f: wp.array1d(dtype=wp.uint8),
+        J: wp.array1d(dtype=wp.float32),
+        F: wp.array1d(dtype=wp.mat22)
+    ) -> None:
+        i = wp.tid()
+
+        if f[i] == SOFT:
+            f[i] = WATER
+            J[i] = 1.0
+        elif f[i] == WATER:
+            u[i] = wp.vec2(0.0)
+            f[i] = SOFT
+            J[i] = 1.0
+            F[i] = wp.mat22(1.0, 0.0, 0.0, 1.0)
 
     def to_soft(self):
         self.u_.fill_(0.0)
@@ -204,7 +228,7 @@ class MaterialPointSolver2D:
 
     def _grid_op(self) -> None:
         wp.launch(self._g_force_and_boundary_kernel, dim=self.shape_, inputs=[
-            self.ug_, self.fg_])
+            self.ug_, self.fg_,])
 
     def _g2p(self) -> None:
         wp.launch(self._g2p_apic_kernel, dim=self.p_.shape[0],
@@ -268,13 +292,14 @@ class MaterialPointSolver2D:
         J[i] = (1.0 + dt*wp.trace(aff)) * J[i]
 
         E = 4e9
-        nu = 0.20
+        nu = 0.3
         LameLa = E*nu / ((1.0+nu)*(1.0-2.0*nu))
         LameMu = E / (2.0*(1.0+nu))
 
         if f[i] == WATER:
-            w_factor = (dt * E) * (1.0 - J[i])
-            stress = wp.mat22(w_factor, 0.0, 0.0, w_factor)
+            # Either might work
+            w = (dt * E) * (1.0 - J[i]) * J[i]
+            stress = wp.mat22(w, 0.0, 0.0, w)
         elif f[i] == SOFT:
             TF = wp.transpose(F[i])
             U, _, V = svd2(F[i])
@@ -398,9 +423,11 @@ if __name__ == '__main__':
                 solver.to_fluid()
             if e.key == 's':
                 solver.to_soft()
-        solver.anim_frame_particle(n_steps=32)
+            if e.key == 'e':
+                solver.exchange()
+        solver.anim_frame_particle(n_steps=64)
         gui.circles(solver.pn_ / res, radius=1.4,
                     palette=[0x0288D2, 0xE2943B, 0xffffff, 0xffffff], palette_indices=solver.fn_)
-        # gui.show()
-        gui.show('images/mpm2d_{:04d}.png'.format(frame_id))
+        gui.show()
+        # gui.show('images/mpm2d_{:04d}.png'.format(frame_id))
         frame_id += 1
