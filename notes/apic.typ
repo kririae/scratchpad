@@ -141,6 +141,131 @@ The hard-to-understand part is, although we do have a quite general definition o
 
 Nodal forces are quite non-trivial to calculate, since the forces are applied on the grid, not on the particles.
 
+In a general FEM context, the nodal forces are calculated by
+$
+  bold(f)_p = -pdv(U, bold(x)_p),
+$
+where $U$ is the system potential; $bold(x)_i$ is the corresponding position of the node $i$. Note that $bold(f)_p$ here is not force density.
+
+System potential is defined as
+$
+  U = integral_(Omega_0) Psi (bold(F)) dd(V),
+$
+where $Omega_0$ is the initial material space, $Psi$ is the strain energy density, and $bold(F)$ is the deformation gradient tensor. Without further discretization, this casts to
+$
+  -pdv(U, bold(x)_p) = - integral_(Omega_0) (pdv(Psi, bold(F)) : pdv(bold(F), bold(x)_p)) dd(V).
+$
+
+But what really is $partial bold(F) \/ partial bold(x)_p$? Let's delve into this.
+
+A common discretization is Barycentric coordinates:
+$
+  bold(x) = bold(x)_0 + sum_i bold(alpha)_i (bold(x)_i - bold(x)_0),
+$
+where $bold(alpha)_i$ is component of the barycentric coordinate; $bold(x)_i$ are the vertices of the element in either world space or material space.
+This is to say, world space and material space share the same barycentric coordinates.
+
+In calculating deformation gradient tensor, this becomes
+$
+  bold(F)_(i j)
+  & = pdv(bold(x)_i, bold(X)_j) = pdv((bold(x)_0 + bold(D) bold(alpha))_i, bold(X)_j) \
+  & = pdv((bold(D) bold(D)_m^(-1) (bold(X) - bold(X)_0))_i, bold(X)_j) \
+  & = bold(D)_(i k) (bold(D)_m^(-1))_(k j)
+$
+where $bold(D)$ and $bold(D)_m$ are $RR^(d times d)$ matrices representing the current and initial configurations of the elements respectively.
+They are constructed from the positions like this (for $d = 2$):
+$
+  bold(D) = mat(bold(x)_1 - bold(x)_0 | bold(x)_2 - bold(x)_0), bold(D)_m = mat(bold(X)_1 - bold(X)_0 | bold(X)_2 - bold(X)_0).
+$
+
+Based on this, energy potential is discretized to
+$
+  -pdv(U, bold(x)_(p i))
+  & = - sum_e V_e^((0)) (bold(P)_e : pdv(bold(F)_e, bold(x)_(p i))) \
+$
+where $bold(x)_p$ lies exactly on the vertices of the elements.
+Computing $partial bold(F)_e \/ partial bold(x)_(p i)$ is highly redundant, refer to the detailed computation as presented in #link("https://graphics.pixar.com/library/DynamicDeformablesSiggraph2020/paper.pdf")[Dynamic Deformables].
+
+Luckily, in the original MPM, we have a much simpler way to calculate the nodal forces (although tricky), MLS-MPM will make it even simpler.
+One thing to notice, in MPM's context, the node positions $bold(x)_i$ are samples in $Omega_t$, which is related as
+$
+  bold(x)_p = sum_i bold(x)_i N_i (bold(x)_p),
+$
+where $bold(x)_p$ are the particles' positions, and $N_i$ are the kernel functions.
+
+Here comes the tricky part.
+To actually calculate the gradient of $bold(F)$, we recall the update rule of $bold(F)$:
+$
+  pdv(bold(F), t) = (nabla bold(v)) bold(F),
+$
+which thus becomes (a implicit push-forward is performed)
+$
+  bold(F)_p^(n+1) = (bold(I) + Delta t sum_i bold(v)_i nabla_bold(x)^top N_i (bold(x)_p)) bold(F)_p^n,
+$
+where $nabla_bold(x)^top N_i (bold(x)_p)$ is the transpose of the tensor $nabla_bold(x) N_i (bold(x)_p)$.
+We can replace $Delta t bold(v)_i$ with $bold(x)^(n+1)_i - bold(x)^(n)_i$ , resulting in
+$
+  bold(F)_p^(n+1) = (bold(I) + sum_i (bold(x)^(n+1)_i - bold(x)_i^n) nabla_bold(x)^top N_i (bold(x)_p)) bold(F)_p^n.
+$
+A great observation is that, these two equations holds for arbitrary $bold(v)_i$ on grid, not limited to the current configuration. If we happend to *construct* a set of $bold(v)_i$ such that the particle, thus the $bold(F)_p$ land on a specific location $bold(x)$, we can obtain $bold(F)$ at that location. The approximation
+$
+  bold(F)_p (bold(x)) = (bold(I) + sum_i (bold(x)_i - bold(x)_i^n) nabla_bold(x)^top N_i (bold(x)_p)) bold(F)_p^n
+$
+is quite accurate near $bold(x)_p$, where $bold(x)_i$ can be chosen under the constraint that
+$
+  bold(x) = bold(x)_p + Delta t sum_i bold(v)_i N_i (bold(x)_p).
+$
+Taking the derivative near the node $i$, we have
+$
+  pdv(bold(F)_p, bold(x)_i) = pdv((sum_j (bold(x)_j - bold(x)_j^n) nabla_bold(x)^top N_j (bold(x))), bold(x)_i) bold(F)_p^n,
+$
+where we choose only the $i$-th node to be adjusted, lefting $bold(x)_j$ where $i = j$ as the only variable, the equation becomes
+$
+  pdv(bold(F)_p, bold(x)_i) = nabla_bold(x)^top N_i (bold(x)) bold(F)_p^n,
+$
+This finaaaaaaaly gives us the force, as
+$
+  bold(f)_i
+  & = -pdv(U, bold(x)_i) = - sum_p V_p Psi(bold(F)_p) \
+  & = - sum_p V_p (pdv(Psi, bold(F)_p) : pdv(bold(F)_p, bold(x)_i)) \
+  & = - sum_p V_p bold(P) bold(F)_p^(n top) nabla_bold(x) N_i (bold(x)_p),
+$
+where $bold(P)$ is the first Piola-Kirchhoff stress tensor.
+
+This loooong approximation works no better than this direct loosy approximation
+$
+  bold(F)(bold(x)) = bold(F)_p N_p (bold(x)), "where" |bold(x) - bold(x)_p| "is small enough",
+$
+thus
+$
+  pdv(bold(F), bold(x)_i) = nabla_bold(x)^top N_p (bold(x)_i) bold(F)_p = nabla_bold(x)^top N_i (bold(x)_p) bold(F)_p.
+$
+
+#block(fill: rgb("#34b8ff66"), inset: 1em, radius: 3pt)[
+  Force calculation is always tricky, both in traditional FEM discretization and MPM,
+  while the hard part is to calculate $nabla_bold(x) bold(F)$.
+  Spatial gradient calculation is *always* related to discretization method, in MPM,
+  the trick is to form a local approximation of $bold(F)$ near particles.
+]
+
+== MLS-MPM and its Simplification
+
+#line(length: 100%, stroke: foreground)
+
+Remember the original Galerkin method, where test functions are used in
++ Constructing the weak form, where the test functions are used to multiply the PDEs
++ Accepting the derivative through _integral by parts_.
++ Compose the solution by linear combination of the test functions.
+
+Consider the MPM's governing equation after time discretization,
+$
+  1 / (Delta t) integral_Omega_t^n bold(q)_alpha rho (bold(v)_alpha^(n+1) - bold(v)_alpha^(n)) dd(bold(x)) \
+  = integral_(partial Omega_t^n) bold(q)_alpha bold(t)_alpha dd(bold(s)) - integral_Omega_t^n bold(q)_(alpha, beta) bold(sigma)_(alpha beta) dd(bold(x)),
+$
+where $alpha$ is the component index, $bold(t)_alpha$ is the traction field on the surface, $bold(q)_(alpha, beta)$ is the gradient of the test function. All variables are implicitly functions on the world space. Gradient of the stress tensor is already transferred onto the test function.
+
+Traditional MPM express the solution field as a linear combination of the B-spline basis functions, say, quadratic B-spline kernel $N_i$.
+
 == Derivations of Weakly Compressible MPM
 
 #line(length: 100%, stroke: foreground)
