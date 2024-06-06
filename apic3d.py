@@ -6,6 +6,7 @@ from typing import Any
 import warp as wp
 import warp.render
 import numpy as np
+import taichi as ti
 
 SOLID = wp.constant(wp.uint8(0))
 WATER = wp.constant(wp.uint8(1))
@@ -95,10 +96,10 @@ class AffineParticleInCellSolver3D:
         self.boundary_ = 5
 
         self.viscosity_ = viscosity
-        self.dt_ = 1e-4
+        self.dt_ = 1e-5
 
         self.n_diffuse_ = 32  # not used
-        self.n_project_ = 32
+        self.n_project_ = 64
         self.damping_ = 0.64
 
         self.p_ = wp.from_numpy(self._init(), dtype=wp.vec3, device="cuda")
@@ -141,9 +142,9 @@ class AffineParticleInCellSolver3D:
         np.copyto(self.pn_, self.p_.numpy())
 
     def _init(self) -> np.ndarray:
-        points_x = np.linspace(0.01, 0.31, int(240/1.2)) * self.length_
-        points_y = np.linspace(0.05, 0.55, int(200/1.2)) * self.width_
-        points_z = np.linspace(0.05, 0.95, int(360/1.2)) * self.height_
+        points_x = np.linspace(0.04, 0.34, int(120*1.2)) * self.length_
+        points_y = np.linspace(0.05, 0.40, int(70*1.2)) * self.width_
+        points_z = np.linspace(0.05, 0.95, int(180*1.2)) * self.height_
         grid_x, grid_y, grid_z = np.meshgrid(points_x, points_y, points_z)
         res = np.vstack(
             (grid_x.flatten(), grid_y.flatten(), grid_z.flatten())).T
@@ -221,10 +222,27 @@ class AffineParticleInCellSolver3D:
     def _init_grid_kernel(fg: wp.array3d(dtype=wp.uint8), boundary: int) -> None:
         i, j, k = wp.tid()
         length, width, height = fg.shape[0], fg.shape[1], fg.shape[2]
+
         if (i < boundary or i >= length - boundary) or  \
             (j < boundary or j >= width - boundary) or \
                 (k < boundary or k >= height - boundary):
             fg[i, j, k] = SOLID
+
+        xl = 160
+        xr = 180
+
+        width = 18
+        if i >= xl and i < xr and j <= 20:
+            if k >= 0 and k < width:
+                fg[i, j, k] = SOLID
+            if k >= 2*width and k < 3*width:
+                fg[i, j, k] = SOLID
+            if k >= 4*width and k < 5*width:
+                fg[i, j, k] = SOLID
+            if k >= 6*width and k < 7*width:
+                fg[i, j, k] = SOLID
+            if k >= 8*width and k < 9*width:
+                fg[i, j, k] = SOLID
 
     @wp.kernel
     def _set_all_flag(
@@ -301,7 +319,7 @@ class AffineParticleInCellSolver3D:
         i, j, k = wp.tid()
 
         if not is_solid(i, j, k, fg):
-            ug[i, j, k] += wp.vec3(0.0, -15680.0, 0.0) * dt
+            ug[i, j, k] += wp.vec3(0.0, -98000.0, 0.0) * dt
 
         if is_water(i, j, k, fg):
             n = wp.vec3(0.0)
@@ -497,25 +515,79 @@ class AffineParticleInCellSolver3D:
 
 
 if __name__ == '__main__':
-    res = 200
-    solver = AffineParticleInCellSolver3D(400, 200, 200)
+    res = 160
+    solver = AffineParticleInCellSolver3D(250, 160, 160)
 
-    # renderer = wp.render.OpenGLRenderer(
-    #     camera_pos=(1.0, 0.8, 3.5),
-    #     draw_sky=False,
-    #     draw_axis=False,
-    #     vsync=False)
+    if False:
+        renderer = wp.render.OpenGLRenderer(
+            camera_pos=(1.0, 0.8, 3.5),
+            draw_sky=False,
+            draw_axis=False,
+            vsync=False)
 
-    for _ in range(128):
-        solver.anim_frame(n_steps=128)
-        # time = renderer.clock_time
-        # renderer.begin_frame(time)
-        arr = solver.pn_ / res
-        # renderer.render_points(
-        #     name='particles', points=arr, radius=0.002)
-        # renderer.end_frame()
+    ti.init(arch=ti.cuda)
+    particle_pos = ti.Vector.field(3, dtype=ti.f32, shape=solver.pn_.shape[0])
+
+    window = ti.ui.Window('APIC 3D', res=(1280, 720), vsync=True, fps_limit=60)
+    canvas = window.get_canvas()
+    scene = window.get_scene()
+    camera = ti.ui.Camera()
+    camera.position(0.8, 0.8, 3.5)
+    camera.lookat(0.8, 0.5, 0)
+    camera.up(0, 1, 0)
+    camera.fov(30)
+
+    for _ in range(1024):
+        solver.anim_frame(n_steps=32)
+        particle_pos.from_numpy(solver.pn_ / res)
+        scene.set_camera(camera)
+        scene.ambient_light((0.6, 0.6, 0.6))
+        scene.point_light(pos=(-1.5, 1.5, 1.5), color=(1, 1, 1))
+        scene.particles(particle_pos, color=(
+            2/255, 136/255, 210/255), radius=0.002)
+        vertices = np.array(
+            [
+                [-1.000000, -1.000000, 1.000000],
+                [-1.000000, 1.000000, 1.000000],
+                [-1.000000, -1.000000, -1.000000],
+                [-1.000000, 1.000000, -1.000000],
+                [1.000000, -1.000000, 1.000000],
+                [1.000000, 1.000000, 1.000000],
+                [1.000000, -1.000000, -1.000000],
+                [1.000000, 1.000000, -1.000000]
+            ]
+        )
+        indices = np.array(
+            [
+                [2, 3, 1],
+                [4, 7, 3],
+                [8, 5, 7],
+                [6, 1, 5],
+                [7, 1, 3],
+                [4, 6, 8],
+                [2, 4, 3],
+                [4, 8, 7],
+                [8, 6, 5],
+                [6, 2, 1],
+                [7, 5, 1],
+                [4, 2, 6],
+            ]
+        )
+        canvas.scene(scene)
+        canvas.set_background_color((0.1, 0.1, 0.1))
+        window.save_image('images/apic3d/apic3d_{:04d}.png'.format(_))
+        window.show()
+
+        if False:
+            time = renderer.clock_time
+            renderer.begin_frame(time)
+            arr = solver.pn_ / res
+            renderer.render_points(
+                name='particles', points=arr, radius=0.002)
+            renderer.end_frame()
 
         # Save numpy array
-        with open(f'archive4/p_{_}.npz', 'wb') as f:
-            print(f'saving frame {_}...')
-            np.savez(f, arr)
+        if False:
+            with open(f'archive4/p_{_}.npz', 'wb') as f:
+                print(f'saving frame {_}...')
+                np.savez(f, arr)
