@@ -57,19 +57,27 @@ L, x = build_laplacian_matrix(mesh)
 
 num_vertices = len(mesh.vertices)
 delta = L @ x
-delta.resize((2 * num_vertices, 3))
 
-Le = sp.lil_array((2 * num_vertices, num_vertices))
+Le = sp.lil_array((num_vertices, num_vertices))
 Le[:num_vertices, :num_vertices] = L
-Le[num_vertices:, :num_vertices] = w * \
-    create_masked_identity(num_vertices, indices)
-
-delta[num_vertices:] = w * create_masked_delta(edited_vertices, indices)
 
 # Prepare the system of equations
 Lt = Le.transpose()
-LtL = Lt @ Le
-LtD = Lt @ delta
+
+if True:
+    # L2 error, i.e., argmin_p |L p - delta|^2
+    LtL = Lt @ Le
+    LtD = Lt @ delta
+else:
+    # L1 error, i.e., direct solve Lp = delta
+    LtL = Le
+    LtD = delta
+
+# Modify the system of equations
+for i in indices:
+    LtL[i, :] = 0
+    LtL[i, i] = 1
+    LtD[i, :] = edited_vertices[i]
 
 # Solve the system of equations
 x_ = spsolve(LtL, LtD)  # Solve for L^T L x = L^T delta

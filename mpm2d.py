@@ -7,8 +7,9 @@ import taichi as ti  # I need taichi's OpenGL render
 
 WATER = wp.constant(wp.uint8(0))
 SOFT = wp.constant(wp.uint8(1))
-SOLID = wp.constant(wp.uint8(2))
-GAS = wp.constant(wp.uint8(3))
+SNOW = wp.constant(wp.uint8(2))
+SOLID = wp.constant(wp.uint8(3))
+GAS = wp.constant(wp.uint8(4))
 
 
 @wp.func
@@ -111,6 +112,9 @@ class MaterialPointSolver2D:
         self.F_ = wp.zeros(self.p_.shape, dtype=wp.mat22)
         self.J_ = wp.ones(self.p_.shape, dtype=wp.float32)
 
+        # plastic deformation
+        self.Jp_ = wp.ones(self.p_.shape, dtype=wp.float32)
+
         self.pn_ = self.p_.numpy()
         self.fn_ = self.f_.numpy()
 
@@ -195,7 +199,8 @@ class MaterialPointSolver2D:
             return res, f
 
         comp = []
-        comp.append(generate(0.05, 0.25, 0.02, 0.62, WATER))
+        comp.append(generate(0.05, 0.25, 0.02, 0.62, WATER, density=1200))
+        comp.append(generate(0.40, 0.60, 0.02, 0.62, SNOW, density=800))
         comp.append(generate(0.75, 0.95, 0.02, 0.62, SOFT, density=800))
 
         res = np.vstack([c[0] for c in comp])
@@ -221,7 +226,7 @@ class MaterialPointSolver2D:
         self.ug_.fill_(0.0)
         self.mg_.fill_(0.0)
         wp.launch(self._p2g_apic_kernel, dim=self.p_.shape[0],
-                  inputs=[self.u_, self.p_, self.c_, self.F_, self.J_, self.f_,
+                  inputs=[self.u_, self.p_, self.c_, self.F_, self.J_, self.Jp_, self.f_,
                           self.ug_, self.mg_, self.dt_])
         wp.launch(self._p2g_postprocess_kernel, dim=self.shape_,
                   inputs=[self.ug_, self.mg_, self.fg_])
@@ -275,6 +280,7 @@ class MaterialPointSolver2D:
         c: wp.array1d(dtype=wp.mat22),
         F: wp.array1d(dtype=wp.mat22),
         J: wp.array1d(dtype=wp.float32),
+        Jp: wp.array1d(dtype=wp.float32),
         f: wp.array1d(dtype=wp.uint8),
         ug: wp.array2d(dtype=wp.vec2),
         mg: wp.array2d(dtype=wp.float32),
@@ -292,22 +298,34 @@ class MaterialPointSolver2D:
         J[i] = (1.0 + dt*wp.trace(aff)) * J[i]
 
         E = 4e9
-        nu = 0.3
+        nu = 0.36
         LameLa = E*nu / ((1.0+nu)*(1.0-2.0*nu))
         LameMu = E / (2.0*(1.0+nu))
 
         if f[i] == WATER:
-            # Either might work
             w = (dt * E) * (1.0 - J[i]) * J[i]
             stress = wp.mat22(w, 0.0, 0.0, w)
-        elif f[i] == SOFT:
-            TF = wp.transpose(F[i])
-            U, _, V = svd2(F[i])
+        elif f[i] == SNOW or f[i] == SOFT:
+            U, S, V = svd2(F[i])
+
+            if f[i] == SNOW:
+                h = wp.clamp(wp.exp(2.0 * (1.0 - Jp[i])), 0.1, 10.0)
+                LameLa *= h
+                LameMu *= h
+                for j in range(2):
+                    new_S = wp.clamp(S[j, j], 1.0 - 2e-2, 1.0 + 8e-3)
+                    Jp[i] *= S[j, j] / new_S
+                    S[j, j] = new_S
+                F[i] = U @ S @ wp.transpose(V)
+
             R = U @ wp.transpose(V)
-            P = 2.0*LameMu*(F[i] - R)@TF + LameLa*(J[i] - 1.0) * \
-                J[i]*wp.mat22(1.0, 0.0, 0.0, 1.0)
+
+            # We calculate the new jacobian on-the-fly for better numerical stability
+            new_J = wp.determinant(S)
+            P = 2.0*LameMu*(F[i] - R)@wp.transpose(F[i]) + LameLa*(new_J - 1.0) * \
+                new_J*wp.mat22(1.0, 0.0, 0.0, 1.0)
             stress = -4.0*dt*P
-        else:
+        elif False:
             invTF = wp.inverse(wp.transpose(F[i]))
             stress = -dt * \
                 ((LameMu * (F[i] - invTF)) + LameLa * wp.log(wp.clamp(J[i], 1e-3, 1e3))
@@ -418,6 +436,7 @@ if __name__ == '__main__':
                  background_color=0x212121)
     frame_id = 0
     while gui.running:
+        save = False
         for e in gui.get_events(ti.GUI.PRESS):
             if e.key == 'f':
                 solver.to_fluid()
@@ -425,9 +444,17 @@ if __name__ == '__main__':
                 solver.to_soft()
             if e.key == 'e':
                 solver.exchange()
-        solver.anim_frame_particle(n_steps=64)
-        gui.circles(solver.pn_ / res, radius=1.4,
-                    palette=[0x0288D2, 0xE2943B, 0xffffff, 0xffffff], palette_indices=solver.fn_)
-        gui.show()
+            if e.key == 'v':
+                save = True
+        solver.anim_frame_particle(n_steps=32)
+        palette = np.array([0x0288D2, 0xE2943B,
+                            0xFCFAF2, 0x000000, 0x000000])
+        gui.circles(solver.pn_ / res, radius=1.6,
+                    palette=palette,
+                    palette_indices=solver.fn_)
+        if save:
+            gui.show('images/mpm2d_{:04d}.png'.format(frame_id))
+        else:
+            gui.show()
         # gui.show('images/mpm2d_{:04d}.png'.format(frame_id))
         frame_id += 1

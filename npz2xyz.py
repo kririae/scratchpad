@@ -2,11 +2,11 @@
 
 import numpy as np
 
-npz_file_path = 'archive3/p_17.npz'
-xyz_file_path = 'fluid.xyz'
+npz_file_path = 'mpm3d.npz'
+xyz_file_path = 'snow.xyz'
 
 data = np.load(npz_file_path)
-arr = data['arr_0']
+arr = data['pn']
 
 if arr.shape[1] != 3:
     raise ValueError(

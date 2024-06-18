@@ -4,7 +4,7 @@
 
 #let foreground = rgb("1F2430")
 #let background = rgb("FFFFFF")
-#let dark_mode = true
+#let dark_mode = false
 #if dark_mode {
   foreground = rgb("FDFDFD")
   background = rgb("1F2430")
@@ -13,6 +13,7 @@
 #set page(fill: background)
 #set text(foreground)
 #set par(justify: true)
+#show link: set text(fill: rgb("34b8ff"))
 
 = Introduction to Material Point Method
 
@@ -119,8 +120,28 @@ $
   bold(B)_p = sum_i N_i bold(v)'_i (bold(x)_i - bold(x)_p)^top.
 $
 
-$bold(K)_p$ can be understood not via its inverse.
-Let $bold(d)_i = bold(x)_i - bold(x)_p$, inertia tensor casts $bold(d)$ into angular momentum. Consider $d = 3$, where $bold(d) = (d_1, d_2, d_3)$, multiplied by $bold(omega) in RR^3$ gives the angular momentum, $bold(L) = bold(K) bold(omega)$. Then $bold(K)^(-1)$ can be understood as the transformation from angular momentum to angular velocity.
+How are these matrices derived? There's no explannation in the original paper, but the derivation is indeed quite simple from a *regression* perspective.
+Define the following regression matrix:
+$
+  bold(C)_p & = op("argmin", limits: #true)_bold(C)_p sum_i N_i (bold(x)_i - bold(x)_p) (
+    bold(C)_p (bold(x)_i - bold(x)_p) - bold(v)_p
+  )^2 \
+  & arrow.double pdv(, bold(C)_p) sum_i N_i (bold(x)_i - bold(x)_p) (
+    bold(C)_p (bold(x)_i - bold(x)_p) - bold(v)_p
+  )^2 = 0 \
+  & arrow.double pdv(, bold(C)_p) sum_i N_i (bold(C)_p bold(d)_i - bold(v)_p)^2 = 0 \
+  & arrow.double pdv(, bold(C)_p) sum_i N_i (
+    bold(d)_i^top bold(C)_p^top bold(C)_p bold(d)_i - 2 bold(d)_i^top bold(C)_p^top bold(v)_i
+  ) = 0 \
+  & arrow.double sum_i N_i (
+    2 bold(C)_p bold(d)_i bold(d)_i^top
+    - 2 bold(v)_i bold(d)_i^top
+  ) = 0 \
+  & arrow.double bold(C)_p sum_i N_i bold(d)_i bold(d)_i^top = sum_i N_i bold(v)_i bold(d)_i^top \
+  & "where" bold(C)_p = bold(B)_p bold(K)_p^(-1).
+$
+For the formula used, refer to #link("https://www.math.uwaterloo.ca/~hwolkowi/matrixcookbook.pdf")[The Matrix Cookbook].
+This do indicate a important factor, the $bold(C)_p$ is a least-square regression of the local velocities on the grid, projected onto the particle.
 
 == Push-forward and Pull-back
 
@@ -245,15 +266,18 @@ $
   Force calculation is always tricky, both in traditional FEM discretization and MPM,
   while the hard part is to calculate $nabla_bold(x) bold(F)$.
   Spatial gradient calculation is *always* related to discretization method, in MPM,
-  the trick is to form a local approximation of $bold(F)$ near particles.
+  the trick is to form a local approximation of $bold(F)$ near particles, which is done by the deformation gradient update rule. MLS-MPM's contribution is to further simplify this process.
 ]
+
+The turnaround is in with, we use APIC in graphics, where $bold(C)_p$ has extra physical meaning.
+But that's a story for later.
 
 == MLS-MPM and its Simplification
 
 #line(length: 100%, stroke: foreground)
 
-Remember the original Galerkin method, where test functions are used in
-+ Constructing the weak form, where the test functions are used to multiply the PDEs
+Remember the original Galerkin method, where test functions are used for
++ Constructing the weak form, where the test functions are used to multiply the PDEs.
 + Accepting the derivative through _integral by parts_.
 + Compose the solution by linear combination of the test functions.
 
@@ -266,6 +290,80 @@ where $alpha$ is the component index, $bold(t)_alpha$ is the traction field on t
 
 Traditional MPM express the solution field as a linear combination of the B-spline basis functions, say, quadratic B-spline kernel $N_i$.
 
+MLS-MPM choose to use the MLS basis functions, which are quite similar to _Kernel method_. Express arbitrary field $f$ with
+$
+  f(bold(z)) = bold(P)^top (bold(z) - bold(x)) bold(c)(bold(x)),
+$
+where $bold(z)$ are the position to evaluate the field, $bold(x)$ is a nearby point (not necessarily reside on the samples), $bold(P)$ is a polynomial basis, $bold(c)$ is a coefficient vector.
+The coefficient vector is further obtained by minimizing
+$
+  J(bold(c)) = sum_i xi_i (bold(x)) (bold(P)^top (bold(x)_i - bold(x)) bold(c)(bold(x)) - f_i)^2,
+$
+where $xi_i$ are weight functions, $f_i$ are samples of the field $f$.
+Again, let us paraphrase the variables involved. $bold(z)$ is the current evaluation point, $bold(x)$ is a point nearby selected intentionally, $bold(c)$ is a coefficient vector on $bold(x)$, $bold(x)_i$ are the sample points, following the order
+$
+  f_i "on" bold(x)_i arrow.double bold(c)(bold(x)) arrow.double f(bold(z)) "composed".
+$
+
+This gives a quite familar approximation,
+$
+  f(bold(z)) = sum_i xi_i (bold(x)) bold(P)^top (bold(z) - bold(x)) bold(M)^(-1)(bold(x)) bold(P)(
+    bold(x)_i - bold(x)
+  ) f_i,
+$
+where $bold(M)(x) = sum_i xi_i (bold(x)) bold(P) (bold(x)_i - bold(x)) bold(P)^top (bold(x)_i - bold(x))$.
+Let $bold(z) = bold(x)_i$ and replace the index $i$ with $p$, we have
+$
+  f(bold(x)_i) = sum_p xi_p (bold(x)) bold(P)^top (bold(x)_i - bold(x)) bold(M)^(-1)(bold(x)) bold(P)(
+    bold(x)_p - bold(x)
+  ) f_p,
+$
+which, is further expressed with
+$
+  f(bold(x)_i) = sum_p Phi_p (bold(x)_i) f_p,
+$
+where basis function $Phi_p$ is defined as
+$
+  Phi_p (bold(z)) = xi_p (bold(x)) bold(P)^top (bold(z) - bold(x)) bold(M)^(-1)(bold(x)) bold(P)(bold(x)_p - bold(x)).
+$
+Note that although we use $p$ as the index, this basis function can also be defined on grid nodes, as they don't differ in essence.
+We do still have the freedom to choose a $bold(x)$ near $bold(x)_p$.
+
+Note that $f(bold(x))$ can also be expressed as $f(bold(x)) = bold(M)^(-1)(bold(x)) bold(b)(bold(x))$, where
+$
+  bold(b)(bold(x)) = sum_i xi_i bold(P)(bold(x)_i - bold(x)) f_i.
+$
+
+In case of $bold(P)(bold(x)) = [1, bold(x)^top]$, this casts to
+$
+  mat(delim: "[", bold(v)_p; ?) = sum_i N_i (bold(x)_p) bold(v)_i mat(delim: "[", 1; (bold(x)_i - bold(x)_p)^top).
+$
+
+Wait, what is the "?", did we just derive the $bold(B)_p$ in APIC? Remember that $bold(C)_p$ is $bold(B)_p (bold(M)_p)^(-1)$ while $bold(M)_p$ is a diagonal matrix "by chance", kind of.
+
+This do also alleviate the problem of calculating the gradient of test function, consider
+$
+  grad bold(v)(bold(x))
+  & = sum_i bold(v)_i grad Phi_i (bold(x)) \
+  & = sum_i bold(v)_i N_i (bold(x)_p) grad bold(P)^top (bold(x) - bold(x)_p) bold(M)^(-1)(bold(x)_p) bold(P)(
+    bold(x)_i - bold(x)_p
+  ) \
+  & = sum_i bold(v)_i N_i (
+    bold(x)_p
+  ) mat(delim: "[", 0; 1; 1; 1) mat(delim: "[", 1, 0, 0, 0; 0, 4, 0, 0; 0, 0, 4, 0; 0, 0, 0, 4) mat(delim: "[", 1; (bold(x)_i - bold(x)_p)^top) \
+  & = 4 sum_i bold(v)_i N_i (bold(x)_p) (bold(x)_i - bold(x)_p)^top = bold(C)_p.
+$
+
+#block(fill: rgb("#34b8ff66"), inset: 1em, radius: 3pt)[
+  Through this chapter, you might have noticed that, MPM comes with a lot of tricks to simplify the calculation.
+
+  1. Mass lumping, where non-diagonal terms are sumed up, to take away the non-locality.
+  2. Grid-based structure with B-spline kernel where the generalized inertia tensor is magically diagonal.
+  3. MLS basis function's polynomial, refer to "A new implementation of the element free Galerkin method".
+
+  All of these magic builds the MPM into a quite simple and efficient method.
+]
+
 == Derivations of Weakly Compressible MPM
 
 #line(length: 100%, stroke: foreground)
@@ -275,7 +373,7 @@ As we have seen already, forces should be applied on the grid instead of particl
 
 We adopt this process into the APIC particle to grid transfer, i.e.,
 $
-  m bold(v)_i = sum_p m_p bold(v)_p N_i (bold(x)_p) + m_p bold(C)_p (bold(x)_i - bold(x)_p),
+  m bold(v)_i = sum_p m_p bold(v)_p N_i (bold(x)_p) + m_p N_i (bold(x)_p) bold(C)_p (bold(x)_i - bold(x)_p),
 $
 where $bold(C)_p$ is the affine transformation matrix in APIC's context.
 

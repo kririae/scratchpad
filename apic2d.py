@@ -89,11 +89,11 @@ class AffineParticleInCellSolver2D:
         self.boundary_ = 5
 
         # FLIP/PIC blend rate
-        self.blend_ = 1.00
+        self.blend_ = 0.00
         self.use_apic = use_apic
 
         # The number of iterations for the projection step
-        self.n_project_ = 64
+        self.n_project_ = 512
 
         # The damping factor for the damped Jacobi iteration
         self.damping_ = 0.64
@@ -152,7 +152,7 @@ class AffineParticleInCellSolver2D:
 
     def _init(self) -> np.ndarray:
         points_x = np.linspace(0.30, 0.70, 800) * self.width_
-        points_y = np.linspace(0.01, 0.41, 800) * self.height_
+        points_y = np.linspace(0.30, 0.70, 800) * self.height_
         density = (500 / (np.max(points_y) - np.min(points_y)))**2
         print(f'average density: {density}')
         grid_x, grid_y = np.meshgrid(points_x, points_y)
@@ -337,7 +337,7 @@ class AffineParticleInCellSolver2D:
 
         # Apply gravity
         if not is_solid(i, j, fg):
-            ug[i, j] += wp.vec2(0.0, -5.0)
+            ug[i, j] += wp.vec2(0.0, -9.8)
 
         # Can refer to
         # https://www.sciencedirect.com/science/article/pii/S0021999120300851
@@ -533,7 +533,7 @@ class AffineParticleInCellSolver2D:
         # constant, are the only two parameters in the simulation).
         # Suppose we are simulating a 1m x 1m box, while L* = 500, then T* = 5e-3.
         # 64 frames gives us 0.32s of physical time.
-        pos = p[i] + vel * 1e-4
+        pos = p[i] + vel * 5e-5
         for j in range(2):
             if pos[j] < float(boundary):
                 pos[j] = float(boundary) + 1e-3
@@ -576,7 +576,7 @@ class AffineParticleInCellSolver2D:
                 vel += coeff * ug_temp
                 aff += coeff * 4.0 * wp.outer(ug_temp, dpos)
 
-        pos = p[i] + vel * 1e-5
+        pos = p[i] + vel * 5e-5
 
         p[i] = pos
         u[i] = vel
@@ -588,10 +588,21 @@ if __name__ == '__main__':
     solver = AffineParticleInCellSolver2D(res, res, use_apic=True)
 
     gui = ti.GUI("PIC/FLIP/APIC", (solver.width_*2,
-                 solver.height_*2), background_color=0x212121)
+                 solver.height_*2), background_color=0xFFFFFF)
     frame_id = 0
     while gui.running:
         solver.anim_frame_particle(n_steps=16)
         gui.circles(solver.pn_ / res, radius=1.0, color=0x0288D1)
-        gui.show()
+
+        save_to = None
+        # for e in gui.get_events(ti.GUI.PRESS):
+        #     if e.key == 's':
+        #         save_to = f'frame_{frame_id:04d}.png'
+        if frame_id == 70 or frame_id == 111 or frame_id == 275:
+            save_to = f'apic_{frame_id:04d}.png'
+
+        if save_to:
+            gui.show(save_to)
+        else:
+            gui.show()
         frame_id += 1
