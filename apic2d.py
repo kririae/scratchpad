@@ -485,13 +485,13 @@ class AffineParticleInCellSolver2D:
         # Central difference gradient calculation is used.
         if is_water(i+1, j, f) or is_water(i-1, j, f):
             if is_solid(i+1, j, f) or is_solid(i-1, j, f):
-                u[i, j].x = 0.0
+                pass
             else:
                 u[i, j].x -= (q[i+1, j] - q[i-1, j]) / 2.0
 
         if is_water(i, j+1, f) or is_water(i, j-1, f):
             if is_solid(i, j+1, f) or is_solid(i, j-1, f):
-                u[i, j].y = 0.0
+                pass
             else:
                 u[i, j].y -= (q[i, j+1] - q[i, j-1]) / 2.0
 

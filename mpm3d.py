@@ -145,16 +145,39 @@ class MaterialPointSolver3D:
         np.copyto(self.fn_, self.f_.numpy())
         wp.synchronize()
 
-    def _init_case(self):
-        points_x = np.linspace(0.04, 0.34, int(120*1.2)) * self.length_
-        points_y = np.linspace(0.05, 0.40, int(70*1.2)) * self.width_
-        points_z = np.linspace(0.05, 0.95, int(180*1.2)) * self.height_
-        grid_x, grid_y, grid_z = np.meshgrid(points_x, points_y, points_z)
-        res = np.vstack(
-            (grid_x.flatten(), grid_y.flatten(), grid_z.flatten())).T
-        f = np.zeros_like(res[:, 0])
-        f.fill(WATER)
-        return res + np.random.rand(*res.shape) - 0.5, f
+    def _init_case(self) -> Tuple[np.ndarray, np.ndarray]:
+        def generate(xl, xr, yl, yr, zl, zr, type, density=240):
+            points_x = (np.linspace(xl, xr, int(
+                (xr-xl)*density*(250/160)))) * self.length_
+            points_y = (np.linspace(yl, yr, int(
+                (yr-yl)*density))) * self.width_
+            points_z = (np.linspace(zl, zr, int(
+                (zr-zl)*density))) * self.height_
+            grid_x, grid_y, grid_z = np.meshgrid(points_x, points_y, points_z)
+            res = np.vstack(
+                (grid_x.flatten(), grid_y.flatten(), grid_z.flatten())).T
+            f = np.zeros_like(res[:, 0])
+            f.fill(type)
+
+            return res, f
+
+        comp = []
+        comp.append(generate(0.04, 0.26, 0.05, 0.40,
+                    0.05, 0.95, WATER, density=240))
+        comp.append(generate(0.50-0.4, 0.628-0.4, 0.05+0.4, 0.25+0.4,
+                    0.40, 0.60, SOFT, density=200))
+        comp.append(generate(0.50-0.0, 0.628-0.0, 0.05+0.0, 0.25+0.0,
+                    0.40, 0.60, SOFT, density=200))
+        # comp.append(generate(0.54-0.3, 0.59-0.3, 0.05+0.4, 0.15+0.4,
+        #             0.45-0.22, 0.55-0.22, SOFT, density=200))
+        # comp.append(generate(0.54-0.3, 0.59-0.3, 0.05+0.4, 0.15+0.4,
+        #             0.45+0.22, 0.55+0.22, SOFT, density=200))
+
+        res = np.vstack([c[0] for c in comp])
+        f = np.hstack([c[1] for c in comp])
+
+        # Add random noise to particle positions
+        return (res + np.random.rand(*res.shape) - 0.5), f
 
     def _init(self) -> None:
         self.fg_.fill_(GAS)
@@ -188,6 +211,14 @@ class MaterialPointSolver3D:
                           self.ug_,
                           self.boundary_, self.dt_])
 
+    def get_water_particles(self) -> None:
+        mask = (self.fn_ == 0)
+        return self.pn_[mask, :]
+
+    def get_soft_particles(self) -> None:
+        mask = (self.fn_ == 1)
+        return self.pn_[mask, :]
+
     @wp.kernel
     def _init_grid_kernel(fg: wp.array3d(dtype=wp.uint8), boundary: int) -> None:
         i, j, k = wp.tid()
@@ -200,18 +231,19 @@ class MaterialPointSolver3D:
         xl = 160
         xr = 180
 
-        width = 18
-        if i >= xl and i < xr and j <= 20:
-            if k >= 0 and k < width:
-                fg[i, j, k] = SOLID
-            if k >= 2*width and k < 3*width:
-                fg[i, j, k] = SOLID
-            if k >= 4*width and k < 5*width:
-                fg[i, j, k] = SOLID
-            if k >= 6*width and k < 7*width:
-                fg[i, j, k] = SOLID
-            if k >= 8*width and k < 9*width:
-                fg[i, j, k] = SOLID
+        if False:
+            width = 18
+            if i >= xl and i < xr and j <= 20:
+                if k >= 0 and k < width:
+                    fg[i, j, k] = SOLID
+                if k >= 2*width and k < 3*width:
+                    fg[i, j, k] = SOLID
+                if k >= 4*width and k < 5*width:
+                    fg[i, j, k] = SOLID
+                if k >= 6*width and k < 7*width:
+                    fg[i, j, k] = SOLID
+                if k >= 8*width and k < 9*width:
+                    fg[i, j, k] = SOLID
 
     @wp.kernel
     def _init_particle_kernel(F: wp.array1d(dtype=wp.mat33)) -> None:
@@ -264,7 +296,7 @@ class MaterialPointSolver3D:
         J[i] = (1.0 + dt*wp.trace(aff)) * J[i]
 
         E = 4e9
-        nu = 0.36
+        nu = 0.16
         LameLa = E*nu / ((1.0+nu)*(1.0-2.0*nu))
         LameMu = E / (2.0*(1.0+nu))
 
@@ -426,10 +458,6 @@ if __name__ == '__main__':
     camera.fov(30)
 
     for _ in range(689):
-        for e in window.get_events():
-            if e.key == 's':
-                with open('mpm3d.npz', 'wb') as f:
-                    np.savez(f, pn=solver.pn_ / res)
         solver.anim_frame(n_steps=32)
         particle_pos.from_numpy(solver.pn_ / res)
         scene.set_camera(camera)
@@ -439,5 +467,10 @@ if __name__ == '__main__':
             22/255, 136/255, 210/255), radius=0.0021)
         canvas.scene(scene)
         canvas.set_background_color((0.1, 0.1, 0.1))
-        window.save_image('images/mpm3d/mpm3d_{:04d}.png'.format(_))
         window.show()
+        if _ == 340 or _ == 571:
+            window.save_image('mpm3d_image_{:04d}.png'.format(_))
+            with open(f'mpm3d_water_{_}.npz', 'wb') as f:
+                np.savez(f, pn=solver.get_water_particles() / res)
+            with open(f'mpm3d_soft_{_}.npz', 'wb') as f:
+                np.savez(f, pn=solver.get_soft_particles() / res)

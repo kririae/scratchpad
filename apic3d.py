@@ -455,19 +455,19 @@ class AffineParticleInCellSolver3D:
 
         if is_water(i+1, j, k, f) or is_water(i-1, j, k, f):
             if is_solid(i+1, j, k, f) or is_solid(i-1, j, k, f):
-                u[i, j, k].x = 0.0
+                pass
             else:
                 u[i, j, k].x -= (q[i+1, j, k] - q[i-1, j, k]) / 2.0
 
         if is_water(i, j+1, k, f) or is_water(i, j-1, k, f):
             if is_solid(i, j+1, k, f) or is_solid(i, j-1, k, f):
-                u[i, j, k].y = 0.0
+                pass
             else:
                 u[i, j, k].y -= (q[i, j+1, k] - q[i, j-1, k]) / 2.0
 
         if is_water(i, j, k+1, f) or is_water(i, j, k-1, f):
             if is_solid(i, j, k+1, f) or is_solid(i, j, k-1, f):
-                u[i, j, k].z = 0.0
+                pass
             else:
                 u[i, j, k].z -= (q[i, j, k+1] - q[i, j, k-1]) / 2.0
 

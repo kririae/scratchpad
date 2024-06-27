@@ -12,7 +12,8 @@ use hickory_resolver::TokioAsyncResolver;
 use log::{error, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time;
+use tokio::sync::mpsc;
+use tokio::{signal, time};
 
 #[derive(Parser, Debug)]
 #[clap(name = "mimp-rs", version, about, long_about = None)]
@@ -22,7 +23,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
@@ -53,16 +54,39 @@ async fn execute(args: Args) -> Result<()> {
     let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
     let resolver = Arc::new(resolver);
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let resolver = resolver.clone();
+    // Register a signal handler to gracefully shutdown the server, we use a mpsc
+    // channel to communicate between the signal handler and the main loop since
+    // they they might reside on different threads.
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("failed to listen for ctrl-c");
+        if let Err(e) = shutdown_tx_clone.send(()).await {
+            error!("{}", e);
+        }
+    });
 
-        tokio::spawn(async move {
-            if let Err(e) = process(stream, resolver).await {
-                error!("{}", e);
+    loop {
+        // Stop the execution on either success
+        tokio::select! {
+            stream = listener.accept() => {
+                if let Ok((stream, _)) = stream {
+                    let resolver = resolver.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = process(stream, resolver).await {
+                            error!("{}", e);
+                        }
+                    });
+                }
+            },
+            _ = shutdown_rx.recv() => {
+                info!("shutting down...");
+                break;
             }
-        });
+        }
     }
+
+    Ok(())
 }
 
 /// Reads a fixed number of bytes from a TCP stream with a timeout.
@@ -133,7 +157,7 @@ async fn process(mut stream: TcpStream, resolver: Arc<TokioAsyncResolver>) -> Re
     );
 
     let timeout = time::Duration::from_secs(2);
-    let mut buffer = [0; 4096];
+    let mut buffer = [0; 1024];
 
     /////////////////////////////////////////////////////////////////////////////
     // The client connects to the server, and sends a version identifier/method
@@ -246,7 +270,7 @@ async fn process(mut stream: TcpStream, resolver: Arc<TokioAsyncResolver>) -> Re
                 // This returns a `Result<IpAddr, anyhow::Error>`
                 match resolver.lookup_ip(&domain).await?.into_iter().next() {
                     Some(ip) => Ok(ip),
-                    None => Err(anyhow!("failed to resolve domain: {domain}")),
+                    None => Err(anyhow!("failed to resolve domain {domain}")),
                 }
             })
             .await
@@ -281,14 +305,18 @@ async fn process(mut stream: TcpStream, resolver: Arc<TokioAsyncResolver>) -> Re
 
     info!("connecting to {human_readable}...");
 
-    let mut target = match time::timeout(time::Duration::from_secs(5), async {
-        TcpStream::connect((addr, port)).await
-    })
-    .await
-    {
-        Ok(x) => x?,
-        Err(_) => bail!("failed to connect {human_readable} after 5 seconds"),
-    };
+    #[repr(u8)]
+    enum ReplyField {
+        Succeeded = 0x00,
+        GeneralFailure = 0x01,
+        ConnectionNotAllowed = 0x02,
+        NetworkUnreachable = 0x03,
+        HostUnreachable = 0x04,
+        ConnectionRefused = 0x05,
+        TTLExpired = 0x06,
+        CommandNotSupported = 0x07,
+        AddressTypeNotSupported = 0x08,
+    }
 
     ///////////////////////////////////////////////////////////////////////////
     // The SOCKS request information is sent by the client as soon as it has
@@ -300,14 +328,56 @@ async fn process(mut stream: TcpStream, resolver: Arc<TokioAsyncResolver>) -> Re
     //      +----+-----+-------+------+----------+----------+
     //      | 1  |  1  | X'00' |  1   | Variable |    2     |
     //      +----+-----+-------+------+----------+----------+
+    let mut target = match time::timeout(time::Duration::from_secs(5), async {
+        TcpStream::connect((addr, port)).await
+    })
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            // Error reported by the `connection` function
+            let reply = ReplyField::HostUnreachable as u8;
+            timed_write_and_flush(
+                &mut stream,
+                &[0x05, 0x00, reply, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                timeout,
+            )
+            .await?;
+            return Err(e.into());
+        }
+        Err(_) => {
+            // Error reported by the `timeout` function
+            let reply = ReplyField::HostUnreachable as u8;
+            timed_write_and_flush(
+                &mut stream,
+                &[0x05, 0x00, reply, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                timeout,
+            )
+            .await?;
+            bail!("failed to connect {human_readable} after 5 seconds")
+        }
+    };
+
     timed_write_and_flush(
         &mut stream,
-        &[0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &[
+            0x05,
+            0x00,
+            ReplyField::Succeeded as u8,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ],
         timeout,
     )
     .await?;
 
     info!("relay established for inbound <=> {human_readable}");
     tokio::io::copy_bidirectional(&mut stream, &mut target).await?;
+
     Ok(())
 }
