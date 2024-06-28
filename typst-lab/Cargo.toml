@@ -1,0 +1,8 @@
+[package]
+name = "typst-lab"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pretty = "0.12.3"
+typst-syntax = "0.11.1"
