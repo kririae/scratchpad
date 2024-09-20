@@ -13,4 +13,3 @@
 #set par(justify: true)
 
 = Implicit Methods
-

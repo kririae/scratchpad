@@ -1,25 +1,67 @@
 #import "@preview/physica:0.9.3": *
-
-#set page(width: 148mm, height: auto)
+#import "@preview/cetz:0.2.2": canvas, draw, vector, matrix
+#import "@preview/codly:1.0.0": *
+#import "@preview/gentle-clues:1.0.0": *
 
 #let foreground = rgb("1F2430")
 #let background = rgb("FFFFFF")
-#let dark_mode = false
-#if dark_mode {
-  foreground = rgb("FDFDFD")
-  background = rgb("1F2430")
+#let blue = rgb(blue)
+#let green = rgb(green)
+#let stylize = gradient.linear(rgb("0074d9FF"), rgb("2ecc4000"))
+
+#show: codly-init.with()
+#show raw.where(block: false): set raw(lang: "typc")
+#show raw.where(block: false): box.with(
+  fill: luma(240),
+  inset: (x: 3pt, y: 0pt),
+  outset: (y: 3pt),
+  radius: 2pt,
+)
+
+// Add a little circle to each of the link.
+#show link: it => {
+  it
+  if type(it.dest) != label {
+    sym.wj
+    h(1.6pt)
+    sym.wj
+    super(box(height: 3.8pt, circle(radius: 1.2pt, stroke: 0.8pt + blue)))
+  }
 }
 
-#set page(fill: background)
+#show heading: it => {
+  box[
+    #if (it.depth == 1) {
+      place(
+        dx: -1em * 80%,
+        dy: 0em,
+        text(sym.hash, stylize),
+      )
+    }
+    #it
+  ]
+}
+
+#set page(width: 160mm, height: auto, fill: background)
 #set text(foreground)
 #set par(justify: true)
-#show link: set text(fill: rgb("34b8ff"))
 
-= Introduction to Material Point Method
+#let hline = line(length: 100%, stroke: (paint: stylize, thickness: 0.6pt))
 
-== Why PIC does not work
+#align(
+  center,
+  [
+    #text(22pt)[
+      Demysifying Material Point Method
+    ] \
+    #v(.3pt)
+    Zike Xu
+  ],
+)
 
-#line(length: 100%, stroke: foreground)
+= Why PIC does not work
+
+#hline
 
 *Particles* have a total angular momentum:
 $
@@ -57,9 +99,9 @@ $
 
 This holds when $bold(x)_p = bold(x)_i$ is a constant. When particles lie in a small kernel, this can be regarded as an approximation.
 
-== From PIC to RPIC
+= From PIC to RPIC
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 We can calculate the total angular momentum lost upon performing grid to particle transformation.
 Through a trivial translation, compensating the $bold(x)_p$ to $bold(x)_i$ in each particle, we can obtain the following momentum loss for a specific particle $p$:
@@ -97,9 +139,9 @@ $
 $
 multiplied by the inverse rigid's inertia tensor, giving the updated local angular velocity $omega'_p$ from $bold(v)'_i$.
 
-== From RPIC to APIC
+= From RPIC to APIC
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 We are now aware that the local DoF, i.e., the local velocity and angular velocity, is projected from a higher DoF presented on the grid.
 This is the key to the APIC method.
@@ -143,9 +185,9 @@ $
 For the formula used, refer to #link("https://www.math.uwaterloo.ca/~hwolkowi/matrixcookbook.pdf")[The Matrix Cookbook].
 This do indicate a important factor, the $bold(C)_p$ is a least-square regression of the local velocities on the grid, projected onto the particle.
 
-== Push-forward and Pull-back
+= Push-forward and Pull-back
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 It can be quite hard to understand the APIC method without deeply understanding the push-forward and pull-back operations.
 The operations are simply defined as a transformation of a function from one space to another.
@@ -156,9 +198,9 @@ Vise versa, _pull-back_ is the inverse operation from $g$ to $f$.
 
 The hard-to-understand part is, although we do have a quite general definition of the push-forward and pull-back, they only work in the context of integration.
 
-== Nodal Forces
+= Nodal Forces
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 Nodal forces are quite non-trivial to calculate, since the forces are applied on the grid, not on the particles.
 
@@ -262,7 +304,7 @@ $
   pdv(bold(F), bold(x)_i) = nabla_bold(x)^top N_p (bold(x)_i) bold(F)_p = nabla_bold(x)^top N_i (bold(x)_p) bold(F)_p.
 $
 
-#block(fill: rgb("#34b8ff66"), inset: 1em, radius: 3pt)[
+#info[
   Force calculation is always tricky, both in traditional FEM discretization and MPM,
   while the hard part is to calculate $nabla_bold(x) bold(F)$.
   Spatial gradient calculation is *always* related to discretization method, in MPM,
@@ -272,9 +314,9 @@ $
 The turnaround is in with, we use APIC in graphics, where $bold(C)_p$ has extra physical meaning.
 But that's a story for later.
 
-== MLS-MPM and its Simplification
+= MLS-MPM and its Simplification
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 Remember the original Galerkin method, where test functions are used for
 + Constructing the weak form, where the test functions are used to multiply the PDEs.
@@ -354,7 +396,7 @@ $
   & = 4 sum_i bold(v)_i N_i (bold(x)_p) (bold(x)_i - bold(x)_p)^top = bold(C)_p.
 $
 
-#block(fill: rgb("#34b8ff66"), inset: 1em, radius: 3pt)[
+#info[
   Through this chapter, you might have noticed that, MPM comes with a lot of tricks to simplify the calculation.
 
   1. Mass lumping, where non-diagonal terms are sumed up, to take away the non-locality.
@@ -364,9 +406,9 @@ $
   All of these magic builds the MPM into a quite simple and efficient method.
 ]
 
-== Derivations of Weakly Compressible MPM
+= Derivations of Weakly Compressible MPM
 
-#line(length: 100%, stroke: foreground)
+#hline
 
 When simulating fluid with MPM, one problem occurs.
 As we have seen already, forces should be applied on the grid instead of particles.
@@ -412,7 +454,7 @@ $
   m bold(v)_i = sum_p m_p bold(v)_p N_i (bold(x)_p) + N_i (bold(x)_p) bold(A)_p (bold(x)_i - bold(x)_p).
 $
 
-#block(fill: rgb("#34b8ff66"), inset: 1em, radius: 3pt)[
+#info[
   The derivation might not depend on IGL, but only the Murnaghan EoS with $K$ as a constant. This results in only
   $ bold(sigma)_p = - K (1 - J) bold(I). $
 
