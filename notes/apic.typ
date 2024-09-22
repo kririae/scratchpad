@@ -6,8 +6,7 @@
 #let foreground = rgb("1F2430")
 #let background = rgb("FFFFFF")
 #let blue = rgb(blue)
-#let green = rgb(green)
-#let stylize = gradient.linear(rgb("0074d9FF"), rgb("2ecc4000"))
+#let stylize = gradient.linear(blue, blue)
 
 #show: codly-init.with()
 #show raw.where(block: false): set raw(lang: "typc")
@@ -42,19 +41,22 @@
   ]
 }
 
+
 #set page(width: 160mm, height: auto, fill: background)
 #set text(foreground)
 #set par(justify: true)
+#set math.equation(numbering: "(1)")
 
-#let hline = line(length: 100%, stroke: (paint: stylize, thickness: 0.6pt))
+#let hline = line(length: 100%, stroke: (paint: stylize, thickness: 0.8pt))
+#let bold(symb) = math.bold(math.upright(symb))
+#let ub(symb) = math.upright(math.bold(symb))
 
 #align(
   center,
   [
-    #text(22pt)[
+    #text(20pt)[
       Demysifying Material Point Method
     ] \
-    #v(.3pt)
     Zike Xu
   ],
 )

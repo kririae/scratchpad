@@ -55,7 +55,7 @@
   center,
   [
     #text(20pt)[
-      My Notes on Differential Rendering
+      Notes on Physically-based Rendering
     ] \
     Zike Xu
   ],
@@ -362,14 +362,156 @@ depends on the size of the differential parameter set, which is generally large.
 Performing NEE on $ub(Q)$ is definitely not efficient enough (equivalent to
 performing spectral rendering with a large number of spectral samples).
 
-We elaborate on the computation of $partial_bold(pi) J$ here,
+We elaborate on the computation of $partial_bold(pi) J$ here (you might ask why we're using again $lr(angle.l A_e, ub(G) ub(S) ub(Q) angle.r)$, because it still reveals the computational pattern in integral form, just as the BDPT):,
 $
-  lr(angle.l ub(G) ub(S) A_e, ub(Q) angle.r)
-  & = integral_A integral_(S^2) [ub(G) ub(S) A_e](bold(p), omega) ub(Q) (
+  lr(angle.l A_e, ub(G) ub(S) ub(Q) angle.r)
+  & = integral_A integral_(S^2) A_e(bold(p), omega) [ub(G) ub(S) ub(Q)] (
     bold(p), omega
   ) dd(sigma(omega)) dd(A(bold(p))) \
-  & = integral_(A^2) ub(Q)[0, 1] G[0; 1] A_e [1, 0] dd(A[0, 1]) \
-  & + integral_(A^3) ub(Q)[0, 1] G[0; 1] f[2, 1, 0] G[1; 2] A_e [2, 1] dd(A[0, 1, 2]) \
+  & = integral_(A^2) {A_e [0, 1] G[0; 1]} ub(Q)[1, 0] dd(A[0, 1]) \
+  & + integral_(A^3) {A_e [0, 1] G[0; 1] G[1; 2] f[2, 1, 0]} ub(Q) [2, 1] dd(A[0, 1, 2]) \
   & dots
 $
-Since we trace from $bold(p)_0$ to $bold(p)_1$, heuristically $ub(Q)(bold(p)_0 -> bold(p)_1)$ should be non-zero. As for particle tracing, we sample $bold(p)_0$ on lights; as for path tracing, we sample $bold(p)_0$ on the camera plane. But $ub(Q)$ is really defined on the whole scene.
+Since we trace from $bold(p)_0$ to $bold(p)_1$, where $bold(p)_0$ sits on the
+camera plane. The computational pattern is exactly the same as the NEE, illustrated by the following pseudo code:
+
+#show "c_omega": "omega"
+#show "c_omegap": "omega'"
+#show "c_p": math.bold("p")
+#show "c_dy": $partial_bold(y) J$
+#show "c_pp": math.bold("p'")
+```python
+def rbp(p, omega, adjoint_radiance):
+    # 1. Find intersection with the closest surface
+    c_pp = ray_intersect(p, omega)
+    # 2. Accumulate scene parameter gradients
+    grad += Q(p, -omega) * adjoint_radiance
+    # 3. Sample the surface's BSDF
+    c_omegap, weight = sample_bsdf(c_pp, -omega)
+    # 4. Recurse
+    rbp(c_pp, c_omegap, adjoint_radiance * weight)
+```
+
+It is almost no different from the NEE, except for the atomic accumulation.
+
+#warning[
+  This above method does not account for change of the scene geometry, so does
+  the original paper. They "believe that the framework can be extended to handle
+  the change of the scene geometry", but I'm not sure how to do it for now.
+]
+
+= Differentiable Rendering 3: The Path-Space Differentiable Rendering
+
+#hline
+
+So the question remains: how to efficiently deal with the discontinuity in the
+geometry without introducing bias or explicitly sampling the sillohutte?
+
+Before continuing, let's first address the discontinuity in the integrator.
+Transferring the differential operator into the integral requires the integrand
+to be differentiable:
+$
+  pdv(, pi) integral_0^1 f(x; pi) dd(x) != integral_0^1 pdv(f(x; pi), pi) dd(x).
+$
+Consider when $f(x; pi) = 1_(x > pi)$, the right-hand side always integrates to
+zero. The trick is to separate the integral into parts at each discontinuity:
+$
+  pdv(, pi) integral_0^1 f(x; pi) dd(x)
+  = sum_i pdv(, pi) integral_(a_i (pi))^(b_i (pi)) f(x; pi) dd(x) \
+  = sum_i [
+    integral_(a_i (pi))^(b_i (pi)) pdv(f(x; pi), pi) dd(x) + pdv(b_i (pi), pi) f(b_i (pi)^-; pi) - pdv(a_i (pi), pi) f(
+      a_i (pi)^+; pi
+    )
+  ] \
+  = underbracket(integral_(0)^(1) pdv(f(x; pi), pi) dd(x), "interior")
+  + underbracket(sum_i [ pdv(b_i (pi), pi) f(b_i (pi)^-; pi) - pdv(a_i (pi), pi) f(
+    a_i (pi)^+; pi
+  )], "boundary").
+$
+
+The equation seems scary, but it is actually quite simple. Extending onto spherical integration,
+$
+  pdv(, pi) (integral_Omega f dd(Omega))
+  = underbracket(integral_Omega pdv(f, pi) dd(Omega), "interior")
+  + underbracket(integral_Gamma lr(angle.l bold(n), pdv(bold(x), pi) angle.r) (f^- - f^+) dd(Gamma), "boundary").
+$ <discontinuity>
+
+You'll easily find that $bold(n)$'s direction does not matter. The components in
+the integral is non-trivial. The result is a $n$ by $1$ matrix, where $n$ is the
+number of parameters. The boundary term requires more attention, as the inner
+product involves a operation on $RR^(3 times 1)$ with $RR^(3 times n)$,
+correspondingly to $n$ inner product of $RR^(3 times 1)$ vector. The later
+integral can be easily written to integrate over the boundary of the scene
+geometry instead of the local sphere (thus solved with Monte Carlo integration).
+
+#info[
+  The method from #link("https://people.csail.mit.edu/tzumao/diffrt/")[Differentiable Monte Carlo Ray Tracing through Edge Sampling] is very complex. That assumes
+  1. Manifold everywhere.
+  2. Detection of Silhouette edges.
+
+  Meanwhile, although the inner product is "not that hard" to compute, $f^- -
+  f^+$ is much more challenging. Because the discontinuity might occur not only at a single geometry but also at the visibility function. See @visibility.
+
+  #figure(
+    image("figure/discontinuity.png", width: 50%),
+    caption: "The discontinuity in the integrator.",
+  ) <visibility>
+]
+
+A little bit tooo complex, I give up here.
+
+= Differentiable Rendering 4: Warped-Area Sampling
+
+#hline
+
+This approach is rather easy to understand. Let's go directly into derivation,
+that can readily reveals almost everything.
+
+As the @discontinuity suggests, two integrals are to be computed: the interior
+and the boundary. While the interior is easy to compute, the boundary is not,
+that requires hard approaches like the sillohutte sampling or bi-directional
+tracing. The idea of the warped-area sampling is similar to the inverse of
+FVM---instead of turning the interior integral into a sum on the boundary, we do
+the opposite.
+
+Consider
+$
+  II_B = integral_(partial D) lr(angle.l bold(n), pdv(bold(x), pi) angle.r) f(bold(x)) dd(partial D(bold(x))),
+$ <discontinuity-boundary>
+where the previous boundary integral is collapsed back to piece-wise integration
+on the area, where $bold(n)$ pointing outwards. The reason to do this is, in
+previous derivations, we want to take care of the two adjacent triangles
+simultaneously in a single boundary sample. But now we sample the area instead
+of the boundary, so the trick is removed.
+
+By _divergence theorem_, @discontinuity-boundary casts to
+$
+  II_B = integral_D nabla_D dot (f(bold(x)) cal(V)_pi (bold(x))) dd(D(bold(x))).
+$
+Note the "boost of DoF" here. We don't need $partial bold(x) \/ partial pi$ to
+be well-defined on the interior, but only on the boundary. The two equations are
+the same, as long as
+1. $cal(V)_pi (bold(x))$ is continuous.
+2. $cal(V)_pi (bold(x))$ converges to the $partial bold(x) \/ partial pi$ near the boundary.
+This is different from how FVM works in a sense that the original function
+covers the boundary and the interior, while this method only requires the
+function to be well-defined on the boundary, giving us much more flexibility to
+choose it our own.
+
+Instead of using the area integral (where the divergence is harder to define),
+we again use the solid-angle integral, which analogous to perform a importance
+sampling from the point's view. This gives us
+$
+  II_B in RR^(n times 1)
+  & = integral_(S^2) nabla_omega dot underbracket([f(omega) cal(V)_pi (omega)], RR^(n times 1)) dd(sigma(omega)) \
+  & = integral_(S^2) [nabla_omega f] (omega)dot cal(V)_pi (omega) dd(sigma(omega)) + integral_(S^2) f(omega) (
+    nabla_omega dot cal(V)_pi
+  ) (omega) dd(sigma(omega)).
+$
+Note that we consider the $1$ channel at a time here.
+
+#info[
+  Change of variables is indeed necessary but got canceled out by the end.
+]
+
+I'll give up this yet. #link("https://shuangz.com/projects/psdr-was-sa23/")[Warped-Area Reparameterization of Differential Path Integrals] does provide a good and brief explannation.

@@ -45,8 +45,11 @@
 #set page(width: 160mm, height: auto, fill: background)
 #set text(foreground)
 #set par(justify: true)
+#set math.equation(numbering: "(1)")
 
 #let hline = line(length: 100%, stroke: (paint: stylize, thickness: 0.8pt))
+#let bold(symb) = math.bold(math.upright(symb))
+#let ub(symb) = math.upright(math.bold(symb))
 
 #align(
   center,
@@ -258,14 +261,98 @@ topics together.
 
 == Mean Curvature Normal
 
-Why defining mean curvature? Summing up the two principal curvature and take
-average seems to be trivial. Remember
+I'll skip the derivation of this part because the original one is quite.. how to say, too relaxed. Meanwhile this requires a lot of knowledge of differential geometry and functional analysis.
+
+Remember the conclusion. Mean curvature normal is the directional to maximize
+the surface area.
+
+== Shape Operator
+
+The shape operator is a linear operator that maps a tangent vector to a vector,
+defined with a $S_bold(p) : T_p M -> T_p M$. We use the symbol $S_bold(p)$ to denote the
+shape operator at point $bold(p)$. It is defined as
 $
-  Delta f (bold(p)) =
-  lim_(epsilon -> 0) frac(4, epsilon^2)
-  frac(1 ,"Area"(B _(epsilon)(bold(p))))
-  integral_(B_(epsilon)(bold(p))) f(bold(q)) - f(bold(p)) dd(s(bold(q)))
+  S_bold(p) (bold(v)) = - nabla_bold(v) bold(n),
 $
+where $bold(v)$ is a vector in the tangent space. The operator "measures how the
+surface
+bends in different directions".
+(Differentiated against a vector in the tangent space is indeed quite strange)
+
+Its quite surprising that $S_bold(p) (bold(v))$ satisfies that
+$
+  cases(
+    S_bold(p) (bold(v)_1) = kappa_1 bold(v)_1,
+    S_bold(p) (bold(v)_2) = kappa_2 bold(v)_2,
+  )
+$
+that is to say, principal directions $bold(v)_1, bold(v)_2 in T_p M$ are
+eigenvectors of $S_bold(p)$ while principal curvatures are eigenvalues. This
+definition is not suitable for numerical computation, as we definitely cannot
+form a matrix of $S_bold(p) : T_p M -> T_p M$ to perform eigenvalue
+decomposition.
+
+Luckily, $T_p M$ is a 2D plane. We can possibly define a matrix $S in RR^(2
+times 2)$ based on arbitrary basis $bold(e)_1$ and $bold(e)_2$,
+$
+  S_bold(p) (v_1 bold(e)_1 + v_2 bold(e)_2)
+  & = v_1 kappa_1 bold(r)_1 + v_2 kappa_2 bold(r)_2 \
+  & = mat(kappa_1 bold(r)_1, kappa_2 bold(r)_2) mat(v_1, v_2)^top \
+  & = mat(bold(r)_1, bold(r)_2) mat(kappa_1, 0; 0, kappa_2) mat(v_1, v_2)^top \
+  => mat(bold(r)_1, bold(r)_2) mat(v'_1, v'_2)^top & = mat(bold(r)_1, bold(r)_2) Lambda mat(v_1, v_2)^top \
+  => bold(v)' & = Lambda bold(v).
+$
+When the coordinate is $E$ instead of $R$, i.e., $E U = R$, where $U$ is a
+rotation matrix. They satisfy
+$
+  cases(
+    E = display(mat(bold(e)_1, bold(e)_2)),
+    R = display(mat(bold(r)_1, bold(r)_2)),
+  ) in RR^(3 times 2),
+$
+World vector $bold(x) = R bold(v)$ should be expressed with
+$bold(x) = E bold(v)^star$. It indicates that $bold(v)^star$, the newly defined
+vector in another parameterization, is related to $bold(v)$ with $bold(v) =
+U^(-1) bold(v)^star$, giving
+$
+  U^(-1) bold(v)^star = Lambda U^(-1) bold(v)^star
+$
+then
+$
+  bold(v)^star = U Lambda U^(-1) bold(v)^star.
+$
+This really aids the computation of the shape operator, because when we obtain
+$U$, a direct matrix multiplication gives $R$, which consist of the principal
+directions. As always, the concrete example can be readily explored with #link("https://doc.sagemath.org/html/en/reference/riemannian_geometry/sage/geometry/riemannian_manifolds/parametrized_surface3d.html")[sage]:
+```python
+u, v = var('u, v', domain='real')
+paraboloid = ParametrizedSurface3D([u, v, u^2+v^2], [u, v], 'paraboloid')
+S = paraboloid.shape_operator()
+print(S)
+print(S.eigenvalues())
+```
+
+== Discrete Shape Operator
+
+Obviously, as a linear discretization, the shape operator cannot be trivially
+defined on the mesh. One approach is to define the shape operator on a quadratic
+surface, as stated by _Estimating Differential Quantities Using Polynomial Fitting of Osculating Jets_.
+
+The idea involves the following steps:
+1. Find the 2-ring neighborhood of the vertex.
+2. Do PCA on the 2-ring neighborhood to obtain the principal directions.
+3. Project vertices onto the plane spanned by the principal directions, then create the height field.
+4. Fit a quadratic surface to the height field, then compute the shape operator.
+5. Re-project the shape operator back to the original space.
+
+Suppose that the height field is $h(u, v) = a_1 u + a_2 v + a_3 u^2 + a_4 u v + a_5 v^2$,
+then the shape operator can be computed as
+```python
+u, v = var('u, v', domain='real')
+a_1, a_2, a_3, a_4, a_5 = var('a_1, a_2, a_3, a_4, a_5', domain='real')
+surface = ParametrizedSurface3D([u, v, a_1*u + a_2*v + a_3*u^2 + a_4*u*v + a_5*v^2], [u, v], 'surface')
+S = surface.shape_operator()
+```
 
 = Mesh Parameterization
 
