@@ -4,5 +4,6 @@
 bunny/
 .venv/
 *.mp4
+.cache/
 
 gitignore.experiments/
