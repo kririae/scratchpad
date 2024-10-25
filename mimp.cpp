@@ -33,15 +33,15 @@ using namespace asio::experimental::awaitable_operators;
 constexpr auto use_nothrow_awaitable = asio::as_tuple(use_awaitable);
 
 namespace {
+constexpr size_t BUFFER_LEN = 512;
+static_assert(BUFFER_LEN >= 256, "buffer length must be at least 256 bytes");
+
 /// The number of active connections
 std::atomic_uint64_t active_conn{0};
-
 /// Timeout that applies to the relay, *can* be modified
 steady_clock::duration relay_timeout{};
-
 /// Timeout that applies to async_connect, should be modified
 steady_clock::duration connect_timeout{};
-
 /// Timeout that applies to general async_read/async_write, should be modified
 steady_clock::duration general_timeout{};
 
@@ -328,27 +328,29 @@ awaitable<void> copy_directional(
 
 /// \brief Copy the data bidirectionally between the client and the server
 awaitable<void> copy_bidirectional(tcp::socket &client, tcp::socket &server, auto &buf) noexcept {
-    steady_clock::time_point client_to_server_deadline{steady_clock::now() + relay_timeout};
-    steady_clock::time_point server_to_client_deadline{steady_clock::now() + relay_timeout};
+    steady_clock::time_point c2s_ddl{steady_clock::now() + relay_timeout};
+    steady_clock::time_point s2c_ddl{steady_clock::now() + relay_timeout};
 
     auto update_up_bytes = [&](size_t n1) { up_bytes.fetch_add(n1); };
     auto update_down_bytes = [&](size_t n1) { down_bytes.fetch_add(n1); };
 
+    // NOTE(krr): two buffers are used to avoid data corruption
+    auto &c2s_buf = buf;
+    auto s2c_buf = std::array<uint8_t, BUFFER_LEN>();
+
     // If timeout is set to zero, disable watchdog
     if (relay_timeout == 0s) {
         co_await (
-            copy_directional(client, server, server_to_client_deadline, buf, update_down_bytes) &&
-            copy_directional(server, client, client_to_server_deadline, buf, update_up_bytes)
+            copy_directional(client, server, s2c_ddl, c2s_buf, update_down_bytes) &&
+            copy_directional(server, client, c2s_ddl, s2c_buf, update_up_bytes)
         );
     } else {
         co_await (
-            (copy_directional(client, server, server_to_client_deadline, buf, update_down_bytes) ||
-             watchdog(
-                 server_to_client_deadline,
-                 [] { warn("relay is timeout-ed after {} s", relay_timeout / 1.0s); }
-             )) &&
-            (copy_directional(server, client, client_to_server_deadline, buf, update_up_bytes) ||
-             watchdog(client_to_server_deadline))
+            (copy_directional(client, server, s2c_ddl, c2s_buf, update_down_bytes) ||
+             watchdog(s2c_ddl, [] { warn("relay is timeout-ed after {} s", relay_timeout / 1.0s); })
+            ) &&
+            (copy_directional(server, client, c2s_ddl, s2c_buf, update_up_bytes) ||
+             watchdog(c2s_ddl))
         );
     }
 }
@@ -394,7 +396,7 @@ awaitable<void> handle_socks5(tcp::socket client) try {
         ~Finally() { active_conn.fetch_sub(1); }
     } finally;
 
-    std::array<uint8_t, 1024> buf;
+    std::array<uint8_t, BUFFER_LEN> buf;
     co_await timed_async_read(client, buffer(buf, 2), use_awaitable);
 
     ///////////////////////////////////////////////////////////////////////////
