@@ -4,7 +4,7 @@ import numpy as np
 import taichi as ti
 from matplotlib import cm
 
-ti.init(arch=ti.cuda)
+ti.init(arch=ti.gpu)
 
 # -------------------------------------------------------------------------------------------------
 # The implementation of M-IGKS
@@ -199,15 +199,18 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     # integrated by Mathematica
     # [eq 8.45, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
+    u1p2 = u1 * u1
+    u2p2 = u2 * u2
+
     Mx = rho_i * u1
     My = rho_i * u2
-    Mxx = rho_i * u1 * u1 + rho_i / 3.0
-    Myy = rho_i * u2 * u2 + rho_i / 3.0
+    Mxx = rho_i * u1p2 + rho_i / 3.0
+    Myy = rho_i * u2p2 + rho_i / 3.0
     Mxy = rho_i * u1 * u2
-    Mxxx = rho_i * u1 + rho_i * u1 * u1 * u1
-    Myyy = rho_i * u2 + rho_i * u2 * u2 * u2
-    Mxxy = rho_i * (1 + 3 * u1 * u1) * u2 / 3.0
-    Mxyy = rho_i * (1 + 3 * u2 * u2) * u1 / 3.0
+    Mxxx = rho_i * u1 + rho_i * u1p2 * u1
+    Myyy = rho_i * u2 + rho_i * u2p2 * u2
+    Mxxy = rho_i * (1 + 3 * u1p2) * u2 / 3.0
+    Mxyy = rho_i * (1 + 3 * u2p2) * u1 / 3.0
 
     h0 = -(a0 * Mx + a1 * Mxx + a2 * Mxy + b0 * My + b1 * Mxy + b2 * Myy)
     h1 = -(a0 * Mxx + a1 * Mxxx + a2 * Mxxy + b0 * Mxy + b1 * Mxxy + b2 * Mxyy)
@@ -218,10 +221,10 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     # (4) Compute the flux correspondingly
     # [eq 8.46, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
-    Mxxxx = rho_i * (1 + 6 * u1 * u1 + 3 * u1 * u1 * u1 * u1) / 3.0
-    Mxxxy = rho_i * (1 + u1 * u1) * u1 * u2
-    Mxyyy = rho_i * (1 + u2 * u2) * u1 * u2
-    Mxxyy = (1 + 3 * u1 * u1) * (1 + 3 * u2 * u2) * rho_i / 9.0
+    Mxxxx = rho_i * (1 + 6 * u1p2 + 3 * u1p2 * u1p2) / 3.0
+    Mxxxy = rho_i * (1 + u1p2) * u1 * u2
+    Mxyyy = rho_i * (1 + u2p2) * u1 * u2
+    Mxxyy = (1 + 3 * u1p2) * (1 + 3 * u2p2) * rho_i / 9.0
 
     T0 = 1 + A0 / 2 - tau * A0
     T1 = -tau * a0 + A1 / 2 - tau * A1
