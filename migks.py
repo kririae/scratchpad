@@ -15,16 +15,24 @@ ti.init(arch=ti.gpu)
 # -------------------------------------------------------------------------------------------------
 
 # Variables on-cell
-Nx = 500 + 2
-Ny = 500 + 2
+Nx = 1000 + 2
+Ny = 1000 + 2
 dtype = ti.f32
-u_ref = 0.1
-Re = 1000
+
+CFL = 0.01
+c_s = 1
+gamma = 2
+mfp = gamma / (2 * c_s**2)
+u_ref = 9.0
+dt = CFL * 1 / (u_ref + c_s)
+Re = 100000
 tau = 3 * u_ref * (Nx - 2) / Re
 stride = 360
 print("=== M-IGKS Parameters ===")
+print(f"= mfp: {mfp:.5f}")
 print(f"= Re:  {Re:.5f}")
 print(f"= tau: {tau:.5f}")
+print(f"= dt:  {dt:.5f}")
 print("=========================")
 
 # Boundary conditions
@@ -32,7 +40,7 @@ GAS = 0
 NO_SLIP = 1
 SLIP = 2
 VELOCITY = 3
-u_bc = ti.Vector([u_ref, 0.0])
+u_bc = ti.Vector([0.0, u_ref])
 
 # -------------------------------------------------------------------------------------------------
 # W = [rho, rho u, ...]
@@ -171,14 +179,24 @@ def migks_recursive_moments(T0, T1, u, mfp):
 
 
 @ti.func
-def migks_combined_moments(i: ti.template(), j: ti.template(), Mx: ti.types.vector(6), My: ti.types.vector(6)):
+def migks_combined_moments(i: ti.template(), j: ti.template(), Mx, My):
     return Mx[i] * My[j]
 
 
 @ti.func
-def migks_flux_high_order_base(
-    T: ti.types.vector(6), Mx: ti.types.vector(6), My: ti.types.vector(6), oi: ti.template(), oj: ti.template()
-):
+def migks_h_base(a, b, Mx, My, oi: ti.template(), oj: ti.template()):
+    return -(
+        a[0] * migks_combined_moments(1 + oi, 0 + oj, Mx, My)
+        + a[1] * migks_combined_moments(2 + oi, 0 + oj, Mx, My)
+        + a[2] * migks_combined_moments(1 + oi, 1 + oj, Mx, My)
+        + b[0] * migks_combined_moments(0 + oi, 1 + oj, Mx, My)
+        + b[1] * migks_combined_moments(1 + oi, 1 + oj, Mx, My)
+        + b[2] * migks_combined_moments(0 + oi, 2 + oj, Mx, My)
+    )
+
+
+@ti.func
+def migks_F_base(T, Mx, My, oi: ti.template(), oj: ti.template()):
     return (
         T[0] * migks_combined_moments(1 + oi, 0 + oj, Mx, My)
         + T[1] * migks_combined_moments(2 + oi, 0 + oj, Mx, My)
@@ -201,8 +219,8 @@ def migks_solve_for_coeff(h0: dtype, h1: dtype, h2: dtype, u1: dtype, u2: dtype)
     """
     r1 = h1 - u1 * h0
     r2 = h2 - u2 * h0
-    a1 = 3 * r1
-    a2 = 3 * r2
+    a1 = 2 * mfp * r1
+    a2 = 2 * mfp * r2
     a0 = h0 - u1 * a1 - u2 * a2
     return a0, a1, a2
 
@@ -259,26 +277,18 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     # integrated by Mathematica
     # [eq 8.45, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
-    u1p2 = u1 * u1
-    u2p2 = u2 * u2
+    MX = migks_recursive_moments(1, u1, u1, mfp)
+    MY = migks_recursive_moments(1, u2, u2, mfp)
 
-    MX = migks_recursive_moments(1, u1, u1, 3.0 / 2.0)
-    MY = migks_recursive_moments(1, u2, u2, 3.0 / 2.0)
-
-    Mx = rho_i * u1
-    My = rho_i * u2
-    Mxx = rho_i * u1p2 + rho_i / 3.0
-    Myy = rho_i * u2p2 + rho_i / 3.0
-    Mxy = rho_i * u1 * u2
-    Mxxx = rho_i * u1 + rho_i * u1p2 * u1
-    Myyy = rho_i * u2 + rho_i * u2p2 * u2
-    Mxxy = rho_i * (1 + 3 * u1p2) * u2 / 3.0
-    Mxyy = rho_i * (1 + 3 * u2p2) * u1 / 3.0
-
-    h0 = -(a0 * Mx + a1 * Mxx + a2 * Mxy + b0 * My + b1 * Mxy + b2 * Myy)
-    h1 = -(a0 * Mxx + a1 * Mxxx + a2 * Mxxy + b0 * Mxy + b1 * Mxxy + b2 * Mxyy)
-    h2 = -(a0 * Mxy + a1 * Mxxy + a2 * Mxyy + b0 * Myy + b1 * Mxyy + b2 * Myyy)
+    a = ti.Vector([a0, a1, a2])
+    b = ti.Vector([b0, b1, b2])
+    h0 = migks_h_base(a, b, MX, MY, 0, 0)
+    h1 = migks_h_base(a, b, MX, MY, 1, 0)
+    h2 = migks_h_base(a, b, MX, MY, 0, 1)
     A0, A1, A2 = migks_solve_for_coeff(h0, h1, h2, u1, u2)
+    A0 *= dt
+    A1 *= dt
+    A2 *= dt
 
     # -------------------------------------------------------------------------------------------------
     # (4) Compute the flux correspondingly
@@ -293,20 +303,24 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     T5 = -tau * b2
     T = ti.Vector([T0, T1, T2, T3, T4, T5])
 
-    F0 = rho_i * migks_flux_high_order_base(T, MX, MY, 0, 0)
-    F1 = rho_i * migks_flux_high_order_base(T, MX, MY, 1, 0)
-    F2 = rho_i * migks_flux_high_order_base(T, MX, MY, 0, 1)
+    F0 = rho_i * migks_F_base(T, MX, MY, 0, 0)
+    F1 = rho_i * migks_F_base(T, MX, MY, 1, 0)
+    F2 = rho_i * migks_F_base(T, MX, MY, 0, 1)
     Fl = R_inv @ ti.Vector([F1, F2])
     return F0, Fl[0], Fl[1]
 
 
 def migks_init_flag():
     flag_np = flag.to_numpy()
-    flag_np[:, Ny - 1] = VELOCITY
-    flag_np[0, :] = NO_SLIP
-    flag_np[Nx - 1, :] = NO_SLIP
-    flag_np[:, 0] = NO_SLIP
+    hw = Nx // 40
+    flag_np[Nx // 2 - hw : Nx // 2 + hw, 0] = VELOCITY
+    flag_np[Nx - 1, :] = SLIP
+    flag_np[:, 0] = SLIP
     flag.from_numpy(flag_np)
+
+
+def migks_init_u():
+    pass
 
 
 @ti.kernel
@@ -363,8 +377,8 @@ def migks_step():
 
         for face_id in range(4):
             F0, F1, F2 = migks_compute_flux(i, j, face_id)
-            d_rho += F0
-            d_m += ti.Vector([F1, F2])
+            d_rho += dt * F0
+            d_m += dt * ti.Vector([F1, F2])
 
         # Perform the FVM update
         rho_prev = rho[i, j]
@@ -386,6 +400,7 @@ def main():
     flag.fill(GAS)
     rho.fill(1.0)
     migks_init_flag()
+    migks_init_u()
     gui = ti.GUI("M-IGKS", (Nx, Ny), background_color=0x212121)
 
     frame_id = 0
@@ -394,7 +409,7 @@ def main():
             gui.running = False
             save()
             break
-        migks_bc_stable()
+        migks_bc()
         migks_step()
         rho.copy_from(rho_new)
         u.copy_from(u_new)

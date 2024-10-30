@@ -22,14 +22,16 @@ Nx = 500 + 2
 Ny = 500 + 2
 D = 2
 K = 0
-b = K + D
+b = 1024
 dtype = ti.f32
 
 PI = 3.1415926535897
 EPS = 1e-5
+CFL = 0.5
 c_s = 1  # Sound of speed, at sqrt(gamma*R*T)
-u_ref = 0.0001  # Reference velocity
+u_ref = 0.1  # Reference velocity
 T_ref = 1.0  # Reference temperature
+dt = CFL * 1.0 / (u_ref + c_s)  # Time step
 gamma = (b + 2) / b  # Heat ratio
 Rg = c_s**2 / (gamma * T_ref)  # Gas constant
 Ma = u_ref / c_s  # Mach number
@@ -41,6 +43,7 @@ stride = 1
 print("=== M-GKFS Parameters ===")
 print(f"= R:   {Rg:.5f}")
 print(f"= mfp: {1.0 / (2 * Rg * T_ref):.5f}")
+print(f"= Ma:  {Ma:.5f}")
 print("=")
 print(f"= Re:  {Re:.5f}")
 print(f"= tau: {tau:.5f}")
