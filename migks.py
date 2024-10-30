@@ -130,6 +130,66 @@ def get_dm_towards(i: int, j: int, face_id: int):
 
 
 @ti.func
+def get_W_at(i: int, j: int):
+    return ti.Vector([
+        rho[i, j],
+        rho[i, j] * u[i, j][0],
+        rho[i, j] * u[i, j][1],
+    ])
+
+
+@ti.func
+def get_grad_W(i: int, j: int):
+    grad_rho = ti.Vector([0.0, 0.0])
+    grad_rhoU1 = ti.Vector([0.0, 0.0])
+    grad_rhoU2 = ti.Vector([0.0, 0.0])
+    W_c = get_W_at(i, j)
+
+    for k in ti.static(range(4)):
+        n = N[k]
+        i_n, j_n = i + n[0], j + n[1]
+        W_n = W_c
+        if is_inside(i_n, j_n):
+            W_n = get_W_at(i_n, j_n)
+        grad_rho += (W_n[0] + W_c[0]) * n / 2.0
+        grad_rhoU1 += (W_n[1] + W_c[1]) * n / 2.0
+        grad_rhoU2 += (W_n[2] + W_c[2]) * n / 2.0
+    return grad_rho, grad_rhoU1, grad_rhoU2
+
+
+@ti.func
+def migks_recursive_moments(T0, T1, u, mfp):
+    """
+    Compute the moments of the distribution function recursively.
+    """
+    m = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    m[0] = T0
+    m[1] = T1
+    for k in ti.static(range(4)):
+        m[k + 2] = m[k + 1] * u + m[k] * (k + 1) / (2 * mfp)
+    return m
+
+
+@ti.func
+def migks_combined_moments(i: ti.template(), j: ti.template(), Mx: ti.types.vector(6), My: ti.types.vector(6)):
+    return Mx[i] * My[j]
+
+
+@ti.func
+def migks_flux_high_order_base(
+    T: ti.types.vector(6), Mx: ti.types.vector(6), My: ti.types.vector(6), oi: ti.template(), oj: ti.template()
+):
+    return (
+        T[0] * migks_combined_moments(1 + oi, 0 + oj, Mx, My)
+        + T[1] * migks_combined_moments(2 + oi, 0 + oj, Mx, My)
+        + T[2] * migks_combined_moments(3 + oi, 0 + oj, Mx, My)
+        + T[3] * migks_combined_moments(1 + oi, 1 + oj, Mx, My)
+        + T[4] * migks_combined_moments(2 + oi, 1 + oj, Mx, My)
+        + T[5] * migks_combined_moments(1 + oi, 2 + oj, Mx, My)
+    )
+
+
+@ti.func
 def migks_solve_for_coeff(h0: dtype, h1: dtype, h2: dtype, u1: dtype, u2: dtype):
     """
     This function solves for equation like:
@@ -202,6 +262,9 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     u1p2 = u1 * u1
     u2p2 = u2 * u2
 
+    MX = migks_recursive_moments(1, u1, u1, 3.0 / 2.0)
+    MY = migks_recursive_moments(1, u2, u2, 3.0 / 2.0)
+
     Mx = rho_i * u1
     My = rho_i * u2
     Mxx = rho_i * u1p2 + rho_i / 3.0
@@ -221,10 +284,6 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     # (4) Compute the flux correspondingly
     # [eq 8.46, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
-    Mxxxx = rho_i * (1 + 6 * u1p2 + 3 * u1p2 * u1p2) / 3.0
-    Mxxxy = rho_i * (1 + u1p2) * u1 * u2
-    Mxyyy = rho_i * (1 + u2p2) * u1 * u2
-    Mxxyy = (1 + 3 * u1p2) * (1 + 3 * u2p2) * rho_i / 9.0
 
     T0 = 1 + A0 / 2 - tau * A0
     T1 = -tau * a0 + A1 / 2 - tau * A1
@@ -232,10 +291,11 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     T3 = A2 / 2 - tau * A2 - tau * b0
     T4 = -tau * a2 - tau * b1
     T5 = -tau * b2
+    T = ti.Vector([T0, T1, T2, T3, T4, T5])
 
-    F0 = Mx * T0 + Mxx * T1 + Mxxx * T2 + Mxy * T3 + Mxxy * T4 + Mxyy * T5
-    F1 = Mxx * T0 + Mxxx * T1 + Mxxxx * T2 + Mxxy * T3 + Mxxxy * T4 + Mxxyy * T5
-    F2 = Mxy * T0 + Mxxy * T1 + Mxxxy * T2 + Mxyy * T3 + Mxxyy * T4 + Mxyyy * T5
+    F0 = rho_i * migks_flux_high_order_base(T, MX, MY, 0, 0)
+    F1 = rho_i * migks_flux_high_order_base(T, MX, MY, 1, 0)
+    F2 = rho_i * migks_flux_high_order_base(T, MX, MY, 0, 1)
     Fl = R_inv @ ti.Vector([F1, F2])
     return F0, Fl[0], Fl[1]
 
@@ -301,7 +361,7 @@ def migks_step():
         d_rho = 0.0
         d_m = ti.Vector([0.0, 0.0])
 
-        for face_id in ti.static(range(4)):
+        for face_id in range(4):
             F0, F1, F2 = migks_compute_flux(i, j, face_id)
             d_rho += F0
             d_m += ti.Vector([F1, F2])
