@@ -279,6 +279,15 @@ def migks_bc():
 
 
 @ti.kernel
+def migks_bc_stable():
+    for i, j in ti.ndrange(Nx, Ny):
+        if flag[i, j] == NO_SLIP or flag[i, j] == SLIP:
+            u[i, j] = ti.Vector([0.0, 0.0])
+        elif flag[i, j] == VELOCITY:
+            u[i, j] = u_bc
+
+
+@ti.kernel
 def migks_step():
     """
     Update the variables on-cell through FVM.
@@ -325,7 +334,7 @@ def main():
             gui.running = False
             save()
             break
-        migks_bc()
+        migks_bc_stable()
         migks_step()
         rho.copy_from(rho_new)
         u.copy_from(u_new)

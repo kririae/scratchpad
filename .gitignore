@@ -1,5 +1,8 @@
 *.obj
 *.stl
+*.pickle
+*.png
+*.jpg
 
 bunny/
 .venv/
@@ -7,3 +10,4 @@ bunny/
 .cache/
 
 gitignore.experiments/
+
