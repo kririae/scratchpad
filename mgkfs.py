@@ -274,8 +274,20 @@ def mgkfs_high_order_base(a, b, Mx, My, oi: ti.template(), oj: ti.template()):
 
 
 @ti.func
+def migks_F_base(T, Mx, My, oi: ti.template(), oj: ti.template()):
+    return (
+        T[0] * mgkfs_combined_moments(1 + oi, 0 + oj, Mx, My)
+        + T[1] * mgkfs_combined_moments(2 + oi, 0 + oj, Mx, My)
+        + T[2] * mgkfs_combined_moments(3 + oi, 0 + oj, Mx, My)
+        + T[3] * mgkfs_combined_moments(1 + oi, 1 + oj, Mx, My)
+        + T[4] * mgkfs_combined_moments(2 + oi, 1 + oj, Mx, My)
+        + T[5] * mgkfs_combined_moments(1 + oi, 2 + oj, Mx, My)
+    )
+
+
+@ti.func
 def mgkfs_F0_base(B, Mx, My, oi: ti.template(), oj: ti.template()):
-    return mgkfs_combined_moments(1, 0, Mx, My) - tau * (
+    return mgkfs_combined_moments(1 + oi, 0 + oj, Mx, My) - tau * (
         B[0] * mgkfs_combined_moments(1 + oi, 0 + oj, Mx, My)
         + B[1] * mgkfs_combined_moments(2 + oi, 0 + oj, Mx, My)
         + B[3] * mgkfs_combined_moments(3 + oi, 0 + oj, Mx, My) / 2.0
@@ -299,6 +311,9 @@ def mgkfs_solve_for_coeff(h0: dtype, h1: dtype, h2: dtype, h3: dtype, u1: dtype,
     r2 = h2 - u2 * h0
     r3 = 2 * h3 - r0 * h0
     a3 = (4 * mfp**2) / (K + 2) * (r3 - 2 * u1 * r1 - 2 * u2 * r2)
+
+    a3 = 0
+
     a2 = 2 * mfp * r2 - u2 * a3
     a1 = 2 * mfp * r1 - u1 * a3
     a0 = h0 - u1 * a1 - u2 * a2 - a3 * r0 / 2
@@ -456,6 +471,7 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     h12 = R @ get_dm_towards(i, j, face_id) / rho_i
     h3 = get_drhoE_towards(i, j, face_id) / rho_i
     a0, a1, a2, a3 = mgkfs_solve_for_coeff(h0, h12[0], h12[1], h3, u1, u2, mfp_i)
+    a3 = 0
     a = ti.Vector([a0, a1, a2, a3])
 
     uij = ti.Vector([i, j]) + V[2 * face_id]
@@ -471,6 +487,7 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     h12 = R @ (rho_uij * u_uij - rho_dij * u_dij) / rho_i
     h3 = (rho_uij * E_uij - rho_dij * E_dij) / rho_i
     b0, b1, b2, b3 = mgkfs_solve_for_coeff(h0, h12[0], h12[1], h3, u1, u2, mfp_i)
+    b3 = 0
     b = ti.Vector([b0, b1, b2, b3])
 
     # -------------------------------------------------------------------------------------------------
@@ -498,7 +515,9 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     h3 = -(mgkfs_high_order_base(a, b, MX, MY, 2, 0) + mgkfs_high_order_base(a, b, MX, MY, 0, 2)) / 2.0
 
     B0, B1, B2, B3 = mgkfs_solve_for_coeff(h0, h1, h2, h3, u1, u2, mfp_i)
+    B3 = 0  # incompressible
     B = ti.Vector([B0, B1, B2, B3])
+
     F0_I = rho_i * mgkfs_F0_base(B, MX, MY, 0, 0)
     F1_I = rho_i * mgkfs_F0_base(B, MX, MY, 1, 0)
     F2_I = rho_i * mgkfs_F0_base(B, MX, MY, 0, 1)
@@ -527,12 +546,33 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     #     / 2.0
     # )
 
-    F0 = rho_i * u1
+    F0 = F0_I - tau * (F0_L)
     F1 = F1_I - tau * (F1_L + F1_R)
     F2 = F2_I - tau * (F2_L + F2_R)
-    F3 = F3_I - tau * (F3_L + F3_R)
+    # F3 = F3_I - tau * (F3_L + F3_R)
     Fl = R_inv @ ti.Vector([F1, F2])
-    return F0, Fl[0], Fl[1], F3
+
+    #  use previous method
+    A0, A1, A2, _ = mgkfs_solve_for_coeff(h0, h1, h2, 0, u1, u2, mfp_i)
+
+    # A factor to determine the method
+    ldt = 0
+
+    T0 = 1 + ldt * A0 / 2 - tau * A0
+    T1 = -tau * a0 + ldt * A1 / 2 - tau * A1
+    T2 = -tau * a1
+    T3 = ldt * A2 / 2 - tau * A2 - tau * b0
+    T4 = -tau * a2 - tau * b1
+    T5 = -tau * b2
+    T = ti.Vector([T0, T1, T2, T3, T4, T5])
+
+    F0_new = rho_i * migks_F_base(T, MX, MY, 0, 0)
+    F1_new = rho_i * migks_F_base(T, MX, MY, 1, 0)
+    F2_new = rho_i * migks_F_base(T, MX, MY, 0, 1)
+    Fl_new = R_inv @ ti.Vector([F1_new, F2_new])
+
+    # return F0_new, Fl_new[0], Fl_new[1], 0
+    return F0, Fl[0], Fl[1], 0
 
 
 def mgkfs_init_flag():
@@ -589,6 +629,7 @@ def migks_step():
         E_new = (rhoE_prev - d_rE) / (rho_prev - d_rho)
         e_new = ti.max(E_new - ti.math.dot(u_new[i, j], u_new[i, j]) / 2.0, EPS)
         T_new[i, j] = e_new * (gamma - 1) / Rg
+        T_new[i, j] = 1
 
 
 def save():

@@ -19,11 +19,10 @@ Nx = 500 + 2
 Ny = 500 + 2
 dtype = ti.f32
 
-CFL = 0.5
+CFL = 0.3
 c_s = 1
 gamma = 2
 mfp = gamma / (2 * c_s**2)
-mfp = 1.5
 u_ref = 0.1
 dt = CFL * mfp / (u_ref + c_s)
 Re = 1000
@@ -286,19 +285,18 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     h2 = migks_h_base(a, b, MX, MY, 0, 1)
     A0, A1, A2 = migks_solve_for_coeff(h0, h1, h2, u1, u2)
 
-    A0 *= dt
-    A1 *= dt
-    A2 *= dt
-
     # -------------------------------------------------------------------------------------------------
     # (4) Compute the flux correspondingly
     # [eq 8.46, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
 
-    T0 = 1 + A0 / 2 - tau * A0
-    T1 = -tau * a0 + A1 / 2 - tau * A1
+    # A factor to determine the method
+    ldt = 2*dt
+
+    T0 = 1 + ldt * A0 / 2 - tau * A0
+    T1 = -tau * a0 + ldt * A1 / 2 - tau * A1
     T2 = -tau * a1
-    T3 = A2 / 2 - tau * A2 - tau * b0
+    T3 = ldt * A2 / 2 - tau * A2 - tau * b0
     T4 = -tau * a2 - tau * b1
     T5 = -tau * b2
     T = ti.Vector([T0, T1, T2, T3, T4, T5])
@@ -421,7 +419,7 @@ def main():
             gui.running = False
             save()
             break
-        # migks_bc()
+        migks_bc()
         migks_step()
         rho.copy_from(rho_new)
         u.copy_from(u_new)
