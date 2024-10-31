@@ -4,7 +4,7 @@ import numpy as np
 import taichi as ti
 from matplotlib import cm
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cuda)
 
 # -------------------------------------------------------------------------------------------------
 # The implementation of M-IGKS
@@ -15,19 +15,19 @@ ti.init(arch=ti.gpu)
 # -------------------------------------------------------------------------------------------------
 
 # Variables on-cell
-Nx = 1000 + 2
-Ny = 1000 + 2
+Nx = 1200 + 2
+Ny = 400 + 2
 dtype = ti.f32
 
 CFL = 0.01
 c_s = 1
 gamma = 2
 mfp = gamma / (2 * c_s**2)
-u_ref = 9.0
-dt = CFL * 1 / (u_ref + c_s)
-Re = 100000
+u_ref = 0.17
+dt = CFL * mfp / (u_ref + c_s)
+Re = 40000
 tau = 3 * u_ref * (Nx - 2) / Re
-stride = 360
+stride = 800
 print("=== M-IGKS Parameters ===")
 print(f"= mfp: {mfp:.5f}")
 print(f"= Re:  {Re:.5f}")
@@ -40,7 +40,7 @@ GAS = 0
 NO_SLIP = 1
 SLIP = 2
 VELOCITY = 3
-u_bc = ti.Vector([0.0, u_ref])
+u_bc = ti.Vector([u_ref, 0.0])
 
 # -------------------------------------------------------------------------------------------------
 # W = [rho, rho u, ...]
@@ -310,17 +310,40 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     return F0, Fl[0], Fl[1]
 
 
+# def migks_init_flag():
+#     flag_np = flag.to_numpy()
+#     flag_np[:, Ny - 1] = VELOCITY
+#     flag_np[0, :] = NO_SLIP
+#     flag_np[Nx - 1, :] = NO_SLIP
+#     flag_np[:, 0] = NO_SLIP
+#     flag.from_numpy(flag_np)
+
+
+@ti.kernel
+def migks_init_sphere(radius: int, cx: int, cy: int):
+    for i, j in ti.ndrange(Nx, Ny):
+        if (i - cx) ** 2 + (j - cy) ** 2 < radius**2:
+            flag[i, j] = NO_SLIP
+
+
 def migks_init_flag():
     flag_np = flag.to_numpy()
-    hw = Nx // 40
-    flag_np[Nx // 2 - hw : Nx // 2 + hw, 0] = VELOCITY
-    flag_np[Nx - 1, :] = SLIP
+    flag_np[:, Ny - 1] = SLIP
+    flag_np[0, :] = VELOCITY
     flag_np[:, 0] = SLIP
+
+    hw = Ny // 8
+    # flag_np[Nx // 3 - hw : Nx // 3 + hw, Ny // 2 - hw : Ny // 2 + hw] = NO_SLIP
     flag.from_numpy(flag_np)
+    migks_init_sphere(hw, Nx // 3, Ny // 2)
 
 
+@ti.kernel
 def migks_init_u():
-    pass
+    for i, j in ti.ndrange(Nx, Ny):
+        if flag[i, j] == GAS:
+            rho[i, j] = 1.0
+            u[i, j] = ti.Vector([u_ref, 0.0])
 
 
 @ti.kernel
@@ -414,7 +437,7 @@ def main():
         rho.copy_from(rho_new)
         u.copy_from(u_new)
         if frame_id % stride == 0:
-            col = cm.coolwarm(np.linalg.norm(u.to_numpy(), axis=-1) / (u_ref * 1.2))
+            col = cm.coolwarm(np.linalg.norm(u.to_numpy(), axis=-1) / (u_ref * 2.2))
             gui.set_image(col)
             gui.show()
         frame_id += 1

@@ -22,12 +22,12 @@ Nx = 500 + 2
 Ny = 500 + 2
 D = 2
 K = 0
-b = 1024
+b = K + D
 dtype = ti.f32
 
 PI = 3.1415926535897
 EPS = 1e-5
-CFL = 0.5
+CFL = 0.01
 c_s = 1  # Sound of speed, at sqrt(gamma*R*T)
 u_ref = 0.1  # Reference velocity
 T_ref = 1.0  # Reference temperature
@@ -36,7 +36,7 @@ gamma = (b + 2) / b  # Heat ratio
 Rg = c_s**2 / (gamma * T_ref)  # Gas constant
 Ma = u_ref / c_s  # Mach number
 
-Re = 100
+Re = 1000
 tau = 3 * u_ref * (Nx - 2) / Re
 stride = 1
 
@@ -263,7 +263,6 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     M_CR = mgkfs_recursive_moments(1, u2_R, u2_R, mfp_R)
 
     rho_i = M_L[0] * rho_L + M_R[0] * rho_R
-    rho_i = ti.max(rho_i, EPS)
     u1 = (M_L[1] * rho_L + M_R[1] * rho_R) / rho_i
     u2 = (M_L[0] * rho_L * u2_L + M_R[0] * rho_R * u2_R) / rho_i
 
@@ -414,11 +413,11 @@ def mgkfs_init_flag():
 def mgkfs_init_u():
     u_np = u.to_numpy()
     hw = Nx // 6
-    u_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw] = ti.Vector([u_ref, 0.0])
+    u_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw, 1] = u_ref
     u.from_numpy(u_np)
 
     # T_np = T.to_numpy()
-    # T_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw] = 1.0001
+    # T_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw] = 1.1
     # T.from_numpy(T_np)
 
 
@@ -440,9 +439,9 @@ def migks_step():
 
         for face_id in range(4):
             F0, F1, F2, F3 = mgkfs_compute_flux(i, j, face_id)
-            d_rho += F0
-            d_m += ti.Vector([F1, F2])
-            d_rE += F3
+            d_rho += dt * F0
+            d_m += dt * ti.Vector([F1, F2])
+            d_rE += dt * F3
 
         # Perform the FVM update
         rho_prev = rho[i, j]

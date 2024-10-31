@@ -54,7 +54,7 @@ def u_Re1000():
     dx = 1.0 / N
     plt.plot(
         np.linspace(0 + 0.5 * dx, 1.0 - 0.5 * dx, N),
-        u_MIGKS[N // 2 + 1, 1:-1, 0] / 0.1,
+        u_MIGKS[N // 2 + 1, 1:-1, 0] / 0.3,
         "g-",
         label="M-IGKS",
     )
