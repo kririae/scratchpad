@@ -15,19 +15,20 @@ ti.init(arch=ti.cuda)
 # -------------------------------------------------------------------------------------------------
 
 # Variables on-cell
-Nx = 1200 + 2
-Ny = 400 + 2
+Nx = 500 + 2
+Ny = 500 + 2
 dtype = ti.f32
 
-CFL = 0.01
+CFL = 0.5
 c_s = 1
 gamma = 2
 mfp = gamma / (2 * c_s**2)
-u_ref = 0.17
+mfp = 1.5
+u_ref = 0.1
 dt = CFL * mfp / (u_ref + c_s)
-Re = 40000
+Re = 1000
 tau = 3 * u_ref * (Nx - 2) / Re
-stride = 800
+stride = 100
 print("=== M-IGKS Parameters ===")
 print(f"= mfp: {mfp:.5f}")
 print(f"= Re:  {Re:.5f}")
@@ -156,9 +157,7 @@ def get_grad_W(i: int, j: int):
     for k in ti.static(range(4)):
         n = N[k]
         i_n, j_n = i + n[0], j + n[1]
-        W_n = W_c
-        if is_inside(i_n, j_n):
-            W_n = get_W_at(i_n, j_n)
+        W_n = get_W_at(i_n, j_n)
         grad_rho += (W_n[0] + W_c[0]) * n / 2.0
         grad_rhoU1 += (W_n[1] + W_c[1]) * n / 2.0
         grad_rhoU2 += (W_n[2] + W_c[2]) * n / 2.0
@@ -286,6 +285,7 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     h1 = migks_h_base(a, b, MX, MY, 1, 0)
     h2 = migks_h_base(a, b, MX, MY, 0, 1)
     A0, A1, A2 = migks_solve_for_coeff(h0, h1, h2, u1, u2)
+
     A0 *= dt
     A1 *= dt
     A2 *= dt
@@ -307,6 +307,7 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     F1 = rho_i * migks_F_base(T, MX, MY, 1, 0)
     F2 = rho_i * migks_F_base(T, MX, MY, 0, 1)
     Fl = R_inv @ ti.Vector([F1, F2])
+
     return F0, Fl[0], Fl[1]
 
 
@@ -328,22 +329,11 @@ def migks_init_sphere(radius: int, cx: int, cy: int):
 
 def migks_init_flag():
     flag_np = flag.to_numpy()
-    flag_np[:, Ny - 1] = SLIP
-    flag_np[0, :] = VELOCITY
-    flag_np[:, 0] = SLIP
-
-    hw = Ny // 8
-    # flag_np[Nx // 3 - hw : Nx // 3 + hw, Ny // 2 - hw : Ny // 2 + hw] = NO_SLIP
+    flag_np[:, Ny - 1] = VELOCITY
+    flag_np[0, :] = NO_SLIP
+    flag_np[:, 0] = NO_SLIP
+    flag_np[Nx - 1, :] = NO_SLIP
     flag.from_numpy(flag_np)
-    migks_init_sphere(hw, Nx // 3, Ny // 2)
-
-
-@ti.kernel
-def migks_init_u():
-    for i, j in ti.ndrange(Nx, Ny):
-        if flag[i, j] == GAS:
-            rho[i, j] = 1.0
-            u[i, j] = ti.Vector([u_ref, 0.0])
 
 
 @ti.kernel
@@ -423,7 +413,6 @@ def main():
     flag.fill(GAS)
     rho.fill(1.0)
     migks_init_flag()
-    migks_init_u()
     gui = ti.GUI("M-IGKS", (Nx, Ny), background_color=0x212121)
 
     frame_id = 0
@@ -432,12 +421,12 @@ def main():
             gui.running = False
             save()
             break
-        migks_bc()
+        # migks_bc()
         migks_step()
         rho.copy_from(rho_new)
         u.copy_from(u_new)
         if frame_id % stride == 0:
-            col = cm.coolwarm(np.linalg.norm(u.to_numpy(), axis=-1) / (u_ref * 2.2))
+            col = cm.coolwarm(np.linalg.norm(u.to_numpy(), axis=-1) / (u_ref * 1.2))
             gui.set_image(col)
             gui.show()
         frame_id += 1

@@ -4,7 +4,7 @@ import numpy as np
 import taichi as ti
 from matplotlib import cm
 
-ti.init(arch=ti.cpu, debug=True)
+ti.init(arch=ti.cuda)
 
 # -------------------------------------------------------------------------------------------------
 # The implementation of M-GKFS (Maxwellian Gas Kinetic Flux Solver)
@@ -27,7 +27,7 @@ dtype = ti.f32
 
 PI = 3.1415926535897
 EPS = 1e-5
-CFL = 0.01
+CFL = 0.1
 c_s = 1  # Sound of speed, at sqrt(gamma*R*T)
 u_ref = 0.1  # Reference velocity
 T_ref = 1.0  # Reference temperature
@@ -38,7 +38,7 @@ Ma = u_ref / c_s  # Mach number
 
 Re = 1000
 tau = 3 * u_ref * (Nx - 2) / Re
-stride = 1
+stride = 10
 
 print("=== M-GKFS Parameters ===")
 print(f"= R:   {Rg:.5f}")
@@ -240,38 +240,6 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     mfp_L, mfp_R = get_mfp(i_L, j_L), get_mfp(i_R, j_R)
     smfp_L, smfp_R = ti.sqrt(mfp_L), ti.sqrt(mfp_R)
 
-    rho_L = (rho_L + rho_R) / 2
-    rho_R = rho_L
-    u1_L = (u1_L + u1_R) / 2
-    u1_R = u1_L
-    T_L = (T_L + T_R) / 2
-    T_R = T_L
-    mfp_L = (mfp_L + mfp_R) / 2
-    mfp_R = mfp_L
-    smfp_L = ti.sqrt(mfp_L)
-    smfp_R = smfp_L
-
-    T0 = erfc(-smfp_L * u1_L) / 2.0
-    T1 = u1_L * T0 + ti.exp(-mfp_L * u1_L**2) / (2 * ti.sqrt(PI * mfp_L))
-    M_L = mgkfs_recursive_moments(T0, T1, u1_L, mfp_L)
-
-    T0 = erfc(smfp_R * u1_R) / 2.0
-    T1 = u1_R * T0 - ti.exp(-mfp_R * u1_R**2) / (2 * ti.sqrt(PI * mfp_R))
-    M_R = mgkfs_recursive_moments(T0, T1, u1_R, mfp_R)
-
-    M_CL = mgkfs_recursive_moments(1, u2_L, u2_L, mfp_L)
-    M_CR = mgkfs_recursive_moments(1, u2_R, u2_R, mfp_R)
-
-    rho_i = M_L[0] * rho_L + M_R[0] * rho_R
-    u1 = (M_L[1] * rho_L + M_R[1] * rho_R) / rho_i
-    u2 = (M_L[0] * rho_L * u2_L + M_R[0] * rho_R * u2_R) / rho_i
-
-    T0 = (u2_L**2 + (b - 1) * Rg * T_L) * M_L[0]
-    T1 = (u2_R**2 + (b - 1) * Rg * T_R) * M_R[0]
-    E_i = ((M_L[2] + T0) * rho_L + (M_R[2] + T1) * rho_R) / (2 * rho_i)
-    e_i = E_i - (u1**2 + u2**2) / 2.0
-    mfp_i = 1.0 / (2 * e_i * (gamma - 1))
-
     # -------------------------------------------------------------------------------------------------
     grad_rho_L, grad_rhoU1_L, grad_rhoU2_L, grad_rhoE_L = get_grad_W(i_L, j_L)
 
@@ -352,6 +320,42 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     b_R = ti.Vector([b0_R, b1_R, b2_R, b3_R])
 
     # -------------------------------------------------------------------------------------------------
+    rho_L = (rho_L + rho_R) / 2
+    rho_R = rho_L
+    u1_L = (u1_L + u1_R) / 2
+    u1_R = u1_L
+    u2_L = (u2_L + u2_R) / 2
+    u2_R = u2_L
+    T_L = (T_L + T_R) / 2
+    T_R = T_L
+    mfp_L = (mfp_L + mfp_R) / 2
+    mfp_R = mfp_L
+    smfp_L = ti.sqrt(mfp_L)
+    smfp_R = smfp_L
+
+    # -------------------------------------------------------------------------------------------------
+    T0 = erfc(-smfp_L * u1_L) / 2.0
+    T1 = u1_L * T0 + ti.exp(-mfp_L * u1_L**2) / (2 * ti.sqrt(PI * mfp_L))
+    M_L = mgkfs_recursive_moments(T0, T1, u1_L, mfp_L)
+
+    T0 = erfc(smfp_R * u1_R) / 2.0
+    T1 = u1_R * T0 - ti.exp(-mfp_R * u1_R**2) / (2 * ti.sqrt(PI * mfp_R))
+    M_R = mgkfs_recursive_moments(T0, T1, u1_R, mfp_R)
+
+    rho_i = M_L[0] * rho_L + M_R[0] * rho_R
+    u1 = (M_L[1] * rho_L + M_R[1] * rho_R) / rho_i
+    u2 = (M_L[0] * rho_L * u2_L + M_R[0] * rho_R * u2_R) / rho_i
+
+    T0 = (u2_L**2 + (b - 1) * Rg * T_L) * M_L[0]
+    T1 = (u2_R**2 + (b - 1) * Rg * T_R) * M_R[0]
+    E_i = ((M_L[2] + T0) * rho_L + (M_R[2] + T1) * rho_R) / (2 * rho_i)
+    e_i = E_i - (u1**2 + u2**2) / 2.0
+    mfp_i = 1.0 / (2 * e_i * (gamma - 1))
+
+    M_CL = mgkfs_recursive_moments(1, u2_L, u2_L, mfp_L)
+    M_CR = mgkfs_recursive_moments(1, u2_R, u2_R, mfp_R)
+
+    # -------------------------------------------------------------------------------------------------
     # Scheme 3
     h0_L = mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 0, 0)
     h1_L = mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 0)
@@ -367,8 +371,8 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     h1 = -(rho_L * h1_L + rho_R * h1_R) / rho_i
     h2 = -(rho_L * h2_L + rho_R * h2_R) / rho_i
     h3 = -(rho_L * h3_L + rho_R * h3_R) / rho_i
-    B0, B1, B2, B3 = mgkfs_solve_for_coeff(h0, h1, h2, h3, u1, u2, mfp_i)
 
+    B0, B1, B2, B3 = mgkfs_solve_for_coeff(h0, h1, h2, h3, u1, u2, mfp_i)
     B = ti.Vector([B0, B1, B2, B3])
     MX = mgkfs_recursive_moments(1, u1, u1, mfp_i)
     MY = mgkfs_recursive_moments(1, u2, u2, mfp_i)
@@ -377,21 +381,30 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     F2_I = rho_i * mgkfs_F0_base(B, MX, MY, 0, 1)
     F3_I = rho_i * (mgkfs_F0_base(B, MX, MY, 2, 0) + mgkfs_F0_base(B, MX, MY, 0, 2)) / 2.0
 
-    F1_L = rho_L * mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 2, 0)
-    F2_L = rho_L * mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 1)
-    F3_L = (
-        rho_L
-        * (mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 3, 0) + mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 2))
-        / 2.0
-    )
 
-    F1_R = rho_R * mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 2, 0)
-    F2_R = rho_R * mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 1, 1)
-    F3_R = (
-        rho_R
-        * (mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 3, 0) + mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 1, 2))
-        / 2.0
-    )
+    a = 0
+    b = 0
+    F1_L = rho_i * mgkfs_high_order_base(a, b, MX, MY, 0, 0)
+    F2_L = rho_i * mgkfs_high_order_base(a, b, MX, MY, 1, 0)
+    F3_L = rho_i * (mgkfs_high_order_base(a, b, MX, MY, 2, 0) + mgkfs_high_order_base(a, b, MX, MY, 0, 2)) / 2.0
+    F1_R = 0
+    F2_R = 0
+    F3_R = 0
+    # F1_L = rho_L * mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 2, 0)
+    # F2_L = rho_L * mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 1)
+    # F3_L = (
+    #     rho_L
+    #     * (mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 3, 0) + mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 2))
+    #     / 2.0
+    # )
+
+    # F1_R = rho_R * mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 2, 0)
+    # F2_R = rho_R * mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 1, 1)
+    # F3_R = (
+    #     rho_R
+    #     * (mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 3, 0) + mgkfs_high_order_base(a_R, b_R, M_R, M_CR, 1, 2))
+    #     / 2.0
+    # )
 
     F0 = F0_I
     F1 = F1_I - tau * (F1_L + F1_R)
@@ -403,22 +416,24 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
 
 def mgkfs_init_flag():
     flag_np = flag.to_numpy()
-    flag_np[:, Ny - 1] = NO_SLIP
-    flag_np[0, :] = NO_SLIP
-    flag_np[Nx - 1, :] = NO_SLIP
-    flag_np[:, 0] = NO_SLIP
+    flag_np[:, Ny - 1] = SLIP
+    flag_np[0, :] = SLIP
+    flag_np[Nx - 1, :] = SLIP
+    flag_np[:, 0] = SLIP
     flag.from_numpy(flag_np)
 
 
 def mgkfs_init_u():
     u_np = u.to_numpy()
     hw = Nx // 6
-    u_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw, 1] = u_ref
+    # u_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw, 1] = u_ref
+    u_np[Nx // 2 - hw : Nx // 2 + hw, 0, 1] = u_ref
     u.from_numpy(u_np)
 
     # T_np = T.to_numpy()
     # T_np[Nx // 2 - hw : Nx // 2 + hw, Ny // 2 - hw : Ny // 2 + hw] = 1.1
     # T.from_numpy(T_np)
+    pass
 
 
 @ti.kernel
@@ -443,15 +458,15 @@ def migks_step():
             d_m += dt * ti.Vector([F1, F2])
             d_rE += dt * F3
 
-        # Perform the FVM update
         rho_prev = rho[i, j]
         u_prev = u[i, j]
-        E_prev = get_rho_E_at(i, j)
+        rhoE_prev = get_rho_E_at(i, j)
+
         rho_new[i, j] = rho_prev - d_rho
         u_new[i, j] = (rho_prev * u_prev - d_m) / (rho_prev - d_rho)
 
-        E_new = (rho_prev * E_prev - d_rE) / (rho_prev - d_rho)
-        e_new = E_new - 0.5 * ti.math.dot(u_new[i, j], u_new[i, j])
+        E_new = (rhoE_prev - d_rE) / (rho_prev - d_rho)
+        e_new = ti.max(E_new - ti.math.dot(u_new[i, j], u_new[i, j]) / 2.0, EPS)
         T_new[i, j] = e_new * (gamma - 1) / Rg
 
 
