@@ -2,6 +2,7 @@ import pickle
 
 import numpy as np
 import taichi as ti
+import torch
 from matplotlib import cm
 
 ti.init(arch=ti.cuda)
@@ -19,20 +20,26 @@ Nx = 500 + 2
 Ny = 500 + 2
 dtype = ti.f32
 
-CFL = 0.3
+CFL = 0.8
 c_s = 1
 gamma = 2
 mfp = gamma / (2 * c_s**2)
-u_ref = 0.1
-dt = CFL * mfp / (u_ref + c_s)
+mfp = 1.5
+u_ref = 0.18
+dt = ti.field(dtype=dtype, shape=())
+dt[None] = CFL / (u_ref + c_s)
 Re = 1000
 tau = 3 * u_ref * (Nx - 2) / Re
-stride = 100
+stride = 500
+
+# Extra configurations
+dynamic_dt = False
+
 print("=== M-IGKS Parameters ===")
 print(f"= mfp: {mfp:.5f}")
 print(f"= Re:  {Re:.5f}")
 print(f"= tau: {tau:.5f}")
-print(f"= dt:  {dt:.5f}")
+print(f"= dt:  {dt[None]:.5f}")
 print("=========================")
 
 # Boundary conditions
@@ -145,24 +152,6 @@ def get_W_at(i: int, j: int):
         rho[i, j] * u[i, j][1],
     ])
 
-
-@ti.func
-def get_grad_W(i: int, j: int):
-    grad_rho = ti.Vector([0.0, 0.0])
-    grad_rhoU1 = ti.Vector([0.0, 0.0])
-    grad_rhoU2 = ti.Vector([0.0, 0.0])
-    W_c = get_W_at(i, j)
-
-    for k in ti.static(range(4)):
-        n = N[k]
-        i_n, j_n = i + n[0], j + n[1]
-        W_n = get_W_at(i_n, j_n)
-        grad_rho += (W_n[0] + W_c[0]) * n / 2.0
-        grad_rhoU1 += (W_n[1] + W_c[1]) * n / 2.0
-        grad_rhoU2 += (W_n[2] + W_c[2]) * n / 2.0
-    return grad_rho, grad_rhoU1, grad_rhoU2
-
-
 @ti.func
 def migks_recursive_moments(T0, T1, u, mfp):
     """
@@ -224,6 +213,14 @@ def migks_solve_for_coeff(h0: dtype, h1: dtype, h2: dtype, u1: dtype, u2: dtype)
 
 
 @ti.func
+def migks_compute_flux_bc(i: int, j: int, face_id: int):
+    """
+    Compute the flux for boundary condition on the face_id-th face
+    """
+    pass
+
+
+@ti.func
 def migks_compute_flux(i: int, j: int, face_id: int):
     """
     Compute the flux on the face_id-th face
@@ -272,7 +269,6 @@ def migks_compute_flux(i: int, j: int, face_id: int):
 
     # -------------------------------------------------------------------------------------------------
     # (3) Compute A0, A1, A2 with a0, a1, a2, b0, b1, b2
-    # integrated by Mathematica
     # [eq 8.45, Yang et al. 2020]
     # -------------------------------------------------------------------------------------------------
     MX = migks_recursive_moments(1, u1, u1, mfp)
@@ -291,12 +287,13 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     # -------------------------------------------------------------------------------------------------
 
     # A factor to determine the method
-    ldt = 2*dt
+    # Set alpha=0 to fallback to M-GKFS variant of incompressible solver
+    alpha = dt[None]
 
-    T0 = 1 + ldt * A0 / 2 - tau * A0
-    T1 = -tau * a0 + ldt * A1 / 2 - tau * A1
+    T0 = 1 + alpha * A0 / 2 - tau * A0
+    T1 = -tau * a0 + alpha * A1 / 2 - tau * A1
     T2 = -tau * a1
-    T3 = ldt * A2 / 2 - tau * A2 - tau * b0
+    T3 = alpha * A2 / 2 - tau * A2 - tau * b0
     T4 = -tau * a2 - tau * b1
     T5 = -tau * b2
     T = ti.Vector([T0, T1, T2, T3, T4, T5])
@@ -306,16 +303,7 @@ def migks_compute_flux(i: int, j: int, face_id: int):
     F2 = rho_i * migks_F_base(T, MX, MY, 0, 1)
     Fl = R_inv @ ti.Vector([F1, F2])
 
-    return F0, Fl[0], Fl[1]
-
-
-# def migks_init_flag():
-#     flag_np = flag.to_numpy()
-#     flag_np[:, Ny - 1] = VELOCITY
-#     flag_np[0, :] = NO_SLIP
-#     flag_np[Nx - 1, :] = NO_SLIP
-#     flag_np[:, 0] = NO_SLIP
-#     flag.from_numpy(flag_np)
+    return ti.Vector([F0, Fl[0], Fl[1]])
 
 
 @ti.kernel
@@ -334,8 +322,22 @@ def migks_init_flag():
     flag.from_numpy(flag_np)
 
 
+def migks_update_dt():
+    """
+    Update the time step size with CFL condition.
+    """
+
+    @torch.compile
+    def torch_op(u_torch):
+        return torch.max(torch.norm(u_torch, dim=-1))
+
+    u_torch = u.to_torch(device="cuda:0")
+    u_max = torch_op(u_torch)
+    dt[None] = CFL / (max(u_max, u_ref) + c_s)
+
+
 @ti.kernel
-def migks_bc():
+def migks_boundary_condition():
     for i, j in ti.ndrange(Nx, Ny):
         if flag[i, j] == GAS:
             continue
@@ -364,15 +366,6 @@ def migks_bc():
 
 
 @ti.kernel
-def migks_bc_stable():
-    for i, j in ti.ndrange(Nx, Ny):
-        if flag[i, j] == NO_SLIP or flag[i, j] == SLIP:
-            u[i, j] = ti.Vector([0.0, 0.0])
-        elif flag[i, j] == VELOCITY:
-            u[i, j] = u_bc
-
-
-@ti.kernel
 def migks_step():
     """
     Update the variables on-cell through FVM.
@@ -383,19 +376,12 @@ def migks_step():
             u_new[i, j] = u[i, j]
             continue
 
-        d_rho = 0.0
-        d_m = ti.Vector([0.0, 0.0])
-
+        dW = ti.Vector([0.0, 0.0, 0.0])
         for face_id in range(4):
-            F0, F1, F2 = migks_compute_flux(i, j, face_id)
-            d_rho += dt * F0
-            d_m += dt * ti.Vector([F1, F2])
+            dW = dW + dt[None] * migks_compute_flux(i, j, face_id)
 
-        # Perform the FVM update
-        rho_prev = rho[i, j]
-        u_prev = u[i, j]
-        rho_new[i, j] = rho_prev - d_rho
-        u_new[i, j] = (rho_prev * u_prev - d_m) / (rho_prev - d_rho)
+        rho_new[i, j] = rho[i, j] - dW[0]
+        u_new[i, j] = (rho[i, j] * u[i, j] - ti.Vector([dW[1], dW[2]])) / rho_new[i, j]
 
 
 def save():
@@ -419,10 +405,15 @@ def main():
             gui.running = False
             save()
             break
-        migks_bc()
+
+        migks_boundary_condition()
+        if dynamic_dt:
+            migks_update_dt()
         migks_step()
+
         rho.copy_from(rho_new)
         u.copy_from(u_new)
+
         if frame_id % stride == 0:
             col = cm.coolwarm(np.linalg.norm(u.to_numpy(), axis=-1) / (u_ref * 1.2))
             gui.set_image(col)
