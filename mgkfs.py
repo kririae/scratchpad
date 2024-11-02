@@ -58,7 +58,6 @@ BC_NO_SLIP = 1
 BC_SLIP = 2
 BC_VELOCITY = 3
 BC_FORWARD = 4
-u_bc = ti.Vector([u_ref[None], 0.0])
 
 # -------------------------------------------------------------------------------------------------
 # W = [rho, rho u, rho E]
@@ -153,13 +152,25 @@ def get_S_at(i: int, j: int, S):
 
 
 @ti.func
+def W_to_S(W):
+    # S: [rho, u1, u2, E]
+    # W: [rho, rho u1, rho u2, rho E]
+    return ti.Vector([W[0], W[1] / W[0], W[2] / W[0], W[3] / W[0]])
+
+
+@ti.func
+def E_to_T(E, u1, u2):
+    e = E - (u1**2 + u2**2) / 2.0
+    return e * (gamma - 1) / Rg
+
+
+@ti.func
 def get_grad_W_green_gauss(i: int, j: int):
     grad_rho = ti.Vector([0.0, 0.0])
     grad_rhoU1 = ti.Vector([0.0, 0.0])
     grad_rhoU2 = ti.Vector([0.0, 0.0])
     grad_rhoE = ti.Vector([0.0, 0.0])
     W_c = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
-
     for k in ti.static(range(4)):
         n = N[k]
         i_n, j_n = i + n[0], j + n[1]
@@ -263,15 +274,18 @@ def venkatakrishnan_limiter(i: int, j: int, D2):
     W_c = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
     W_max = W_c
     W_min = W_c
+
     for k in ti.static(range(4)):
         i_n = i + N[k][0]
         j_n = j + N[k][1]
         if is_inside(i_n, j_n):
             W_n = get_W_at(i_n, j_n, W_max)
-            W_max = ti.max(W_max, W_n)
-            W_min = ti.min(W_min, W_n)
+            W_max = ti.math.max(W_max, W_n)
+            W_min = ti.math.min(W_min, W_n)
+
     D1_max = W_max - W_c
     D1_min = W_min - W_c
+
     D1 = ti.Vector([0.0, 0.0, 0.0, 0.0])
     phi = ti.Vector([0.0, 0.0, 0.0, 0.0])
 
@@ -282,8 +296,8 @@ def venkatakrishnan_limiter(i: int, j: int, D2):
         elif D2[k] < 0:
             D1[k] = D1_min[k]
 
-    # Venkatakrishnan limiter
-    epsilon2 = 5**3
+    # apply Venkatakrishnan limiter
+    epsilon2 = 0.1**3
     phi = 1.0 / D2 * ((D1**2 + epsilon2) * D2 + 2 * D2**2 * D1) / (D1**2 + 2 * D2**2 + D1 * D2 + epsilon2)
     for k in ti.static(range(4)):
         if D2[k] == 0:
@@ -292,27 +306,35 @@ def venkatakrishnan_limiter(i: int, j: int, D2):
 
 
 @ti.func
-def mgkfs_initial_reconstruction_L(i: int, j: int, face_id: int):
-    S_C = get_S_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
-    S_R = get_S_at(i + N[face_id][0], j + N[face_id][1], S_C)
-    D2 = (S_R - S_C) / 2.0
-    # limiter = venkatakrishnan_limiter(i, j, D2)
-    limiter = 0
-    S = S_C + limiter * D2
-    return S[0], ti.Vector([S[1], S[2]]), ti.max(S[3], EPS)
+def mgkfs_initial_reconstruction_L(i: int, j: int, face_id: int, dW):
+    W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
+    limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
+    # limiter = ti.Vector([0.0, 0.0, 0.0, 0.0])
+    dWT = dW.transpose()
+    for k in ti.static(range(4)):
+        r = N[k] / 2.0
+        D2 = dWT @ r
+        limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, D2))
+    W = W_C + limiter * (dWT @ (N[face_id] / 2.0))
+    S = W_to_S(W)
+    return S
 
 
 @ti.func
-def mgkfs_initial_reconstruction_R(i: int, j: int, face_id: int):
+def mgkfs_initial_reconstruction_R(i: int, j: int, face_id: int, dW):
     i += N[face_id][0]
     j += N[face_id][1]
-    S_C = get_S_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
-    S_L = get_S_at(i - N[face_id][0], j - N[face_id][1], S_C)
-    D2 = -(S_C - S_L) / 2.0
-    # limiter = venkatakrishnan_limiter(i, j, D2)
-    limiter = 0
-    S = S_C + limiter * D2
-    return S[0], ti.Vector([S[1], S[2]]), ti.max(S[3], EPS)
+    W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
+    limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
+    # limiter = ti.Vector([0.0, 0.0, 0.0, 0.0])
+    dWT = dW.transpose()
+    for k in ti.static(range(4)):
+        r = N[k] / 2.0
+        D2 = dWT @ r
+        limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, D2))
+    W = W_C + limiter * (dWT @ (-N[face_id] / 2.0))
+    S = W_to_S(W)
+    return S
 
 
 @ti.func
@@ -322,14 +344,13 @@ def mgkfs_rotate_frame(W, R):
 
 
 @ti.func
-def mgkfs_compute_gradients_and_coeffs(i, j, rho, u1, u2, mfp, R, R_inv):
-    dW = R_inv @ get_grad_W_isotropic_finite_difference(i, j)
+def mgkfs_compute_gradient_coeffs(dW, rho, u1, u2, mfp, R, R_inv):
+    dW = R_inv @ dW
     dSdX = mgkfs_rotate_frame(dW[0, :], R) / rho
     dSdY = mgkfs_rotate_frame(dW[1, :], R) / rho
 
     a = mgkfs_solve_for_coeff(dSdX[0], dSdX[1], dSdX[2], dSdX[3], u1, u2, mfp)
     b = mgkfs_solve_for_coeff(dSdY[0], dSdY[1], dSdY[2], dSdY[3], u1, u2, mfp)
-
     return a, b
 
 
@@ -340,6 +361,8 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     """
 
     # -------------------------------------------------------------------------------------------------
+    # Compute the normal vector and the rotation matrix
+    # -------------------------------------------------------------------------------------------------
     n_i = N[face_id]
     R = ti.Matrix([[n_i[0], n_i[1]], [-n_i[1], n_i[0]]], dt=ti.i32)
     R_inv = R.transpose()
@@ -347,16 +370,32 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     i_L, j_L = i, j
     i_R, j_R = i + N[face_id][0], j + N[face_id][1]
 
-    rho_L, u_L, T_L = mgkfs_initial_reconstruction_L(i_L, j_L, face_id)
-    rho_R, u_R, T_R = mgkfs_initial_reconstruction_R(i_L, j_L, face_id)
-    u1_L, u2_L = R @ u_L
-    u1_R, u2_R = R @ u_R
+    # -------------------------------------------------------------------------------------------------
+    # Compute spatial gradient on the L and R side with
+    # 1. Green-Gauss method
+    # 2. Isotropic finite difference
+    # 3. High-order finite difference
+    # -------------------------------------------------------------------------------------------------
+    dW_L = get_grad_W_isotropic_finite_difference(i_L, j_L)
+    dW_R = get_grad_W_isotropic_finite_difference(i_R, j_R)
+
+    S_L = mgkfs_initial_reconstruction_L(i_L, j_L, face_id, dW_L)
+    S_R = mgkfs_initial_reconstruction_R(i_L, j_L, face_id, dW_R)
+    S_L = mgkfs_rotate_frame(S_L, R)
+    S_R = mgkfs_rotate_frame(S_R, R)
+    rho_L, u1_L, u2_L, E_L = S_L
+    rho_R, u1_R, u2_R, E_R = S_R
+    T_L, T_R = E_to_T(E_L, u1_L, u2_L), E_to_T(E_R, u1_R, u2_R)
     mfp_L, mfp_R = 1.0 / (2 * Rg * T_L), 1.0 / (2 * Rg * T_R)
 
     # -------------------------------------------------------------------------------------------------
-    a_L, b_L = mgkfs_compute_gradients_and_coeffs(i_L, j_L, rho_L, u1_L, u2_L, mfp_L, R, R_inv)
-    a_R, b_R = mgkfs_compute_gradients_and_coeffs(i_R, j_R, rho_R, u1_R, u2_R, mfp_R, R, R_inv)
+    # Compute the spatial gradient coefficients with flux limiter
+    # -------------------------------------------------------------------------------------------------
+    a_L, b_L = mgkfs_compute_gradient_coeffs(dW_L, rho_L, u1_L, u2_L, mfp_L, R, R_inv)
+    a_R, b_R = mgkfs_compute_gradient_coeffs(dW_R, rho_R, u1_R, u2_R, mfp_R, R, R_inv)
 
+    # -------------------------------------------------------------------------------------------------
+    # Perform reconstruction on the interface (validated by Mathematica)
     # -------------------------------------------------------------------------------------------------
     T0 = erfc(-ti.sqrt(mfp_L) * u1_L) / 2.0
     T1 = u1_L * T0 + ti.exp(-mfp_L * u1_L**2) / (2 * ti.sqrt(PI * mfp_L))
@@ -380,6 +419,8 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
     M_CR = mgkfs_recursive_moments(1, u2_R, u2_R, mfp_R)
 
     # -------------------------------------------------------------------------------------------------
+    # Apply compatibility conditions to solve for temporal derivatives `B`
+    # -------------------------------------------------------------------------------------------------
     h0_L = mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 0, 0)
     h1_L = mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 1, 0)
     h2_L = mgkfs_high_order_base(a_L, b_L, M_L, M_CL, 0, 1)
@@ -397,6 +438,7 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
 
     B = mgkfs_solve_for_coeff(h0, h1, h2, h3, u1, u2, mfp_i)
 
+    # -------------------------------------------------------------------------------------------------
     MX = mgkfs_recursive_moments(1, u1, u1, mfp_i)
     MY = mgkfs_recursive_moments(1, u2, u2, mfp_i)
 
