@@ -4,7 +4,7 @@ import numpy as np
 import taichi as ti
 from matplotlib import cm
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cuda)
 
 # -------------------------------------------------------------------------------------------------
 # The implementation of M-GKFS (Maxwellian Gas Kinetic Flux Solver)
@@ -23,11 +23,12 @@ ti.init(arch=ti.gpu)
 # 2. [x] change the tau to the one in the paper
 # 3. [x] add back the non-zero K
 # 4. [x] consider the heat flux term in the paper
-# 5. switch to RK23/RK45 for time integration
+# 5. [x] switch to RK23/RK45 for time integration
 # 6. implement the more elaborate boundary condition
 # 7. [x] make the van Leer limiter work
 # ... iteratively
 # -------------------------------------------------------------------------------------------------
+
 
 # Options:
 # - "velocity"
@@ -45,11 +46,11 @@ dtype = ti.f32
 
 PI = 3.1415926535897
 EPS = 1e-6
-CFL = 0.23
+CFL = 0.13
 c_s = 1  # Sound of speed, at sqrt(gamma*R*T)
 
 u_ref = ti.field(dtype=dtype, shape=())
-u_ref[None] = 2.0  # Reference velocity
+u_ref[None] = 2.80  # Reference velocity
 
 T_ref = 1.0  # Reference temperature
 S_ref = 110.4 / 285.0  # Reference Sutherland's constant
@@ -59,21 +60,27 @@ Rg = c_s**2 / (gamma * T_ref)  # Gas constant
 Ma = u_ref[None] / c_s  # Mach number
 
 viscosity = ti.field(dtype=dtype, shape=())
-viscosity[None] = 1e-5
+viscosity[None] = 1e-4
 stride = 20
 
 Pr = ti.field(dtype=dtype, shape=())
 Pr[None] = 0.7
 
 # Limiter get's sharper interface but less stability
-enable_limiter = True
+# NOTE: in our case, van Albada limiter is stabler, working with the MUSCL scheme
+#       but venkatakrishnan limiter is sharper
+LM_NONE = 0
+LM_VAN_ALBADA = 1
+LM_VENKATAKRISHNAN = 2
+
+limiter = LM_VAN_ALBADA
 
 print("[mgkfs] === M-GKFS Parameters ===")
-print(f"[mgkfs] = mfp:  {1.0 / (2 * Rg * T_ref):.5f}")
-print(f"[mgkfs] = Ma:   {Ma:.5f}")
+print(f"[mgkfs] = mfp:   {1.0 / (2 * Rg * T_ref):.5f}")
+print(f"[mgkfs] = Ma:    {Ma:.5f}")
 print("[mgkfs] =")
-print(f"[mgkfs] = Re:   {u_ref[None] / viscosity[None]:.2f}")
-print(f"[mgkfs] = gamma:{gamma:.5f}")
+print(f"[mgkfs] = Re:    {u_ref[None] / viscosity[None]:.2f}")
+print(f"[mgkfs] = gamma: {gamma:.5f}")
 print("[mgkfs] =========================")
 
 # Boundary conditions
@@ -96,14 +103,22 @@ flag = ti.field(dtype=ti.i8, shape=(Nx, Ny))
 rho = ti.field(dtype=dtype, shape=(Nx, Ny))
 u = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
 T = ti.field(dtype=dtype, shape=(Nx, Ny))
-rho_new = ti.field(dtype=dtype, shape=(Nx, Ny))
-u_new = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
-T_new = ti.field(dtype=dtype, shape=(Nx, Ny))
 
 # Runge-Kutta temporaries
 rho_k1 = ti.field(dtype=dtype, shape=(Nx, Ny))
+rho_k2 = ti.field(dtype=dtype, shape=(Nx, Ny))
+rho_k3 = ti.field(dtype=dtype, shape=(Nx, Ny))
+rho_k4 = ti.field(dtype=dtype, shape=(Nx, Ny))
 u_k1 = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
+u_k2 = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
+u_k3 = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
+u_k4 = ti.Vector.field(2, dtype=dtype, shape=(Nx, Ny))
 T_k1 = ti.field(dtype=dtype, shape=(Nx, Ny))
+T_k2 = ti.field(dtype=dtype, shape=(Nx, Ny))
+T_k3 = ti.field(dtype=dtype, shape=(Nx, Ny))
+T_k4 = ti.field(dtype=dtype, shape=(Nx, Ny))
+
+field_type = ti.types.ndarray(dtype=dtype, ndim=2)
 
 # Gradient of rho
 grad_rho = ti.field(dtype=dtype, shape=(Nx, Ny))
@@ -134,9 +149,48 @@ def erf(x):
     return sign * y
 
 
+# A approximation function from https://forums.developer.nvidia.com/t/an-accuracy-optimized-performance-competitive-implementation-of-erfcf/222654
+@ti.func
+def erfc_accu(x):
+    TWO_TO_M24 = 5.9604644775390625e-8
+
+    a = ti.abs(x)
+
+    p = a + 2.0
+    r = 1.0 / p
+    q = a * r - 2.0 * r
+
+    p = -4.00900841e-4
+    p = p * q - 1.23049226e-3
+    p = p * q + 1.31353654e-3
+    p = p * q + 8.63232370e-3
+    p = p * q - 8.05992913e-3
+    p = p * q - 5.42046241e-2
+    p = p * q + 1.64055422e-1
+    p = p * q - 1.66031465e-1
+    p = p * q - 9.27639827e-2
+    p = p * q + 2.76978403e-1
+
+    d = 2.0 * a + 1.0
+    r = 1.0 / d
+    q = (p + 1.0) * r
+
+    s = a * a
+    e = ti.exp(-s) * 2**24
+    t = -a * a + s
+    r = q * e + q * e * t
+    r = r * TWO_TO_M24
+
+    r = 0.0 if a > 10.0546875 else r
+    r = 2.0 - r if x < 0.0 else r
+
+    return r
+
+
 @ti.func
 def erfc(x):
-    return 1 - erf(x)
+    # return 1.0 - erf(x)
+    return erfc_accu(x)
 
 
 @ti.func
@@ -203,6 +257,13 @@ def W_to_S(W):
     # S: [rho, u1, u2, E]
     # W: [rho, rho u1, rho u2, rho E]
     return ti.Vector([W[0], W[1] / W[0], W[2] / W[0], W[3] / W[0]])
+
+
+@ti.func
+def ensure_physical_state(W):
+    W[0] = ti.max(W[0], 0)
+    W[3] = ti.max(W[3], 0)
+    return W
 
 
 @ti.func
@@ -498,16 +559,13 @@ def van_leer_limiter(s1, s2):
 @ti.func
 def mgkfs_initial_reconstruction_L(i: int, j: int, face_id: int, dW):
     S = ti.Vector([0.0, 0.0, 0.0, 0.0])
-    if ti.static(enable_limiter):
-        W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
-        dWT = dW.transpose()
-        limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
-        for k in range(4):
-            limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, dWT @ (N[k])))
-        W = W_C + limiter * (dWT @ (N[face_id] / 2.0))
-        S = W_to_S(W)
-    else:
-        S = get_S_at(i, j, S)
+    W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
+    dWT = dW.transpose()
+    limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
+    for k in range(4):
+        limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, dWT @ (N[k])))
+    W = W_C + limiter * (dWT @ (N[face_id] / 2.0))
+    S = W_to_S(W)
     return S
 
 
@@ -515,17 +573,13 @@ def mgkfs_initial_reconstruction_L(i: int, j: int, face_id: int, dW):
 def mgkfs_initial_reconstruction_R(i: int, j: int, face_id: int, dW):
     i += N[face_id][0]
     j += N[face_id][1]
-    S = ti.Vector([0.0, 0.0, 0.0, 0.0])
-    if ti.static(enable_limiter):
-        W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
-        dWT = dW.transpose()
-        limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
-        for k in range(4):
-            limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, dWT @ (N[k])))
-        W = W_C + limiter * (dWT @ (-N[face_id] / 2.0))
-        S = W_to_S(W)
-    else:
-        S = get_S_at(i, j, S)
+    W_C = get_W_at(i, j, ti.Vector([0.0, 0.0, 0.0, 0.0]))
+    dWT = dW.transpose()
+    limiter = ti.Vector([1.0, 1.0, 1.0, 1.0])
+    for k in range(4):
+        limiter = ti.math.min(limiter, venkatakrishnan_limiter(i, j, dWT @ (N[k])))
+    W = W_C + limiter * (dWT @ (-N[face_id] / 2.0))
+    S = W_to_S(W)
     return S
 
 
@@ -535,14 +589,14 @@ def mgkfs_initial_reconstruction(i: int, j: int, face_id: int, dW_L, dW_R):
 
 
 @ti.func
-def mgkfs_MUSCL_reconstruction(i: int, j: int, face_id: int, dW_L, dW_R):
+def mgkfs_MUSCL_reconstruction(i: int, j: int, face_id: int):
     i_p, j_p = i + N[face_id][0], j + N[face_id][1]
     i_pp, j_pp = i + 2 * N[face_id][0], j + 2 * N[face_id][1]
     i_n, j_n = i - N[face_id][0], j - N[face_id][1]
 
     W_L = ti.Vector([0.0, 0.0, 0.0, 0.0])
     W_R = W_L
-    if is_gas(i_p, j_p) and is_gas(i_n, j_n) and is_gas(i_pp, j_pp) and enable_limiter:
+    if is_gas(i_p, j_p) and is_gas(i_n, j_n) and is_gas(i_pp, j_pp) and limiter == LM_VAN_ALBADA:
         # Upwind biased reconstruction
         kappa = 1.0 / 3.0
 
@@ -553,7 +607,9 @@ def mgkfs_MUSCL_reconstruction(i: int, j: int, face_id: int, dW_L, dW_R):
 
         s_p = W_p - W
         s_n = W - W_n
-        s = (2 * s_p * s_n + EPS) / (s_n**2 + s_p**2 + EPS)
+
+        # van Albada limiter
+        s = (2 * s_p * s_n + 1e-6) / (s_n**2 + s_p**2 + 1e-6)
 
         W_L = W + s * ((1 + s * kappa) * s_p / 4 + (1 - s * kappa) * s_n / 4)
         W_R = W_p - s * ((1 - s * kappa) * (W_pp - W_p) / 4 + (1 + s * kappa) * s_p / 4)
@@ -561,7 +617,7 @@ def mgkfs_MUSCL_reconstruction(i: int, j: int, face_id: int, dW_L, dW_R):
         W_L = get_W_at_unsafe(i, j)
         W_R = get_W_at(i_p, j_p, W_L)
 
-    S_L, S_R = W_to_S(W_L), W_to_S(W_R)
+    S_L, S_R = ensure_physical_state(W_to_S(W_L)), ensure_physical_state(W_to_S(W_R))
     return S_L, S_R
 
 
@@ -610,8 +666,10 @@ def mgkfs_compute_flux(i: int, j: int, face_id: int):
         dW_L = get_grad_W_green_gauss(i_L, j_L)
         dW_R = get_grad_W_green_gauss(i_R, j_R)
 
-    S_L, S_R = mgkfs_MUSCL_reconstruction(i_L, j_L, face_id, dW_L, dW_R)
-    if False:
+    S_L, S_R = ti.Vector([0.0, 0.0, 0.0, 0.0]), ti.Vector([0.0, 0.0, 0.0, 0.0])
+    if limiter == LM_NONE or limiter == LM_VAN_ALBADA:
+        S_L, S_R = mgkfs_MUSCL_reconstruction(i_L, j_L, face_id)
+    else:
         S_L, S_R = mgkfs_initial_reconstruction(i_L, j_L, face_id, dW_L, dW_R)
 
     S_L = mgkfs_rotate_frame(S_L, R)
@@ -760,8 +818,8 @@ def mgkfs_init():
     flag_np[:, Ny - 1] = BC_SLIP
     flag_np[Nx - 1, :] = BC_FORWARD
 
-    hw = 160
-    flag_np[Nx // 3 : -1, 0:hw] = BC_SLIP
+    hw = 200
+    flag_np[Nx // 3 : -1, 0:-1] = BC_SLIP
     flag.from_numpy(flag_np)
 
     # -------------------------------------------------------------------------------------------------
@@ -816,18 +874,18 @@ def mgkfs_boundary_condition():
             u[i, j] = u_ / cnt_
 
             E_average = E_ / cnt_
-            T[i, j] = ti.max(E_to_T(E_average, u_[0], u_[1]), EPS)
+            T[i, j] = ti.max(E_to_T(E_average, u_[0], u_[1]), 0)
 
 
 @ti.func
-def mgkfs_update_macroscopic(i: int, j: int, dW, rho_k, u_k, T_k):
+def mgkfs_update_differential(i: int, j: int, dW, rho_k, u_k, T_k):
     """
     Update the macroscopic variables.
     """
     rho_new = rho[i, j] - dW[0]
     u_new = (rho[i, j] * u[i, j] - dW[1:3]) / (rho[i, j] - dW[0])
     E_new = (rho[i, j] * get_E_at(i, j) - dW[3]) / (rho[i, j] - dW[0])
-    e_new = ti.max(E_new - ti.math.dot(u_new[i, j], u_new[i, j]) / 2.0, EPS)
+    e_new = ti.max(E_new - ti.math.dot(u_new, u_new) / 2.0, 0)
     T_new = e_new * (gamma - 1) / Rg
 
     rho_k[i, j] = rho_new - rho[i, j]
@@ -836,7 +894,7 @@ def mgkfs_update_macroscopic(i: int, j: int, dW, rho_k, u_k, T_k):
 
 
 @ti.kernel
-def mgkfs_step(rho_k, u_k, T_k):
+def mgkfs_calc_differential(rho_k: ti.template(), u_k: ti.template(), T_k: ti.template()):
     """
     Update the variables on-cell through FVM.
     """
@@ -849,7 +907,97 @@ def mgkfs_step(rho_k, u_k, T_k):
         dW = ti.Vector([0.0, 0.0, 0.0, 0.0])
         for face_id in range(4):
             dW += mgkfs_compute_flux(i, j, face_id)
-        mgkfs_update_macroscopic(i, j, dW, )
+        mgkfs_update_differential(i, j, dW, rho_k, u_k, T_k)
+
+
+@ti.kernel
+def mgkfs_update_macroscopic(factor: dtype, rho_k: ti.template(), u_k: ti.template(), T_k: ti.template()):
+    for i, j in ti.ndrange(Nx, Ny):
+        rho[i, j] += factor * dt[None] * rho_k[i, j]
+        u[i, j] += factor * dt[None] * u_k[i, j]
+        T[i, j] += factor * dt[None] * T_k[i, j]
+
+
+@ti.kernel
+def mgkfs_update_macroscopic_rk2(
+    rho_k1: ti.template(),
+    rho_k2: ti.template(),
+    u_k1: ti.template(),
+    u_k2: ti.template(),
+    T_k1: ti.template(),
+    T_k2: ti.template(),
+):
+    for i, j in ti.ndrange(Nx, Ny):
+        rho[i, j] += dt[None] * (-rho_k1[i, j] + rho_k2[i, j]) / 2
+        u[i, j] += dt[None] * (-u_k1[i, j] + u_k2[i, j]) / 2
+        T[i, j] += dt[None] * (-T_k1[i, j] + T_k2[i, j]) / 2
+
+
+@ti.kernel
+def mgkfs_update_macroscopic_rk4(
+    rho_k1: ti.template(),
+    rho_k2: ti.template(),
+    rho_k3: ti.template(),
+    rho_k4: ti.template(),
+    u_k1: ti.template(),
+    u_k2: ti.template(),
+    u_k3: ti.template(),
+    u_k4: ti.template(),
+    T_k1: ti.template(),
+    T_k2: ti.template(),
+    T_k3: ti.template(),
+    T_k4: ti.template(),
+):
+    for i, j in ti.ndrange(Nx, Ny):
+        rho[i, j] += dt[None] * (rho_k1[i, j] + 2 * rho_k2[i, j] - 4 * rho_k3[i, j] + rho_k4[i, j]) / 6
+        u[i, j] += dt[None] * (u_k1[i, j] + 2 * u_k2[i, j] - 4 * u_k3[i, j] + u_k4[i, j]) / 6
+        T[i, j] += dt[None] * (T_k1[i, j] + 2 * T_k2[i, j] - 4 * T_k3[i, j] + T_k4[i, j]) / 6
+
+
+def mgkfs_euler_step():
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k1, u_k1, T_k1)
+    mgkfs_update_macroscopic(1.0, rho_k1, u_k1, T_k1)
+
+
+def mgkfs_rk2_step():
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k1, u_k1, T_k1)
+    mgkfs_update_macroscopic(1.0, rho_k1, u_k1, T_k1)
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k2, u_k2, T_k2)
+    mgkfs_update_macroscopic_rk2(rho_k1, rho_k2, u_k1, u_k2, T_k1, T_k2)
+
+
+def mgkfs_rk4_step():
+    # This is quite special, as we need to calculate the differential for each stage
+    # k1=f(yn)
+    # k2=f(yn+0.5*dt*k1)
+    # k3=f(yn+0.5*dt*k2)
+    # k4=f(yn+dt*k3)
+    def mgkfs_restore_state():
+        rho.copy_from(rho_k4)
+        u.copy_from(u_k4)
+        T.copy_from(T_k4)
+
+    rho_k4.copy_from(rho)
+    u_k4.copy_from(u)
+    T_k4.copy_from(T)
+
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k1, u_k1, T_k1)
+    mgkfs_update_macroscopic(0.5, rho_k1, u_k1, T_k1)
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k2, u_k2, T_k2)
+    mgkfs_restore_state()
+    mgkfs_update_macroscopic(0.5, rho_k2, u_k2, T_k2)
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k3, u_k3, T_k3)
+    mgkfs_restore_state()
+    mgkfs_update_macroscopic(1.0, rho_k3, u_k3, T_k3)
+    mgkfs_boundary_condition()
+    mgkfs_calc_differential(rho_k4, u_k4, T_k4)
+    mgkfs_update_macroscopic_rk4(rho_k1, rho_k2, rho_k3, rho_k4, u_k1, u_k2, u_k3, u_k4, T_k1, T_k2, T_k3, T_k4)
 
 
 @ti.kernel
@@ -885,11 +1033,13 @@ def main():
         mgkfs_boundary_condition()
         dt[None] = 1.0
         mgkfs_update_dt()
-        mgkfs_step()
 
-        rho.copy_from(rho_new)
-        u.copy_from(u_new)
-        T.copy_from(T_new)
+        if False:
+            mgkfs_euler_step()
+        elif True:
+            mgkfs_rk2_step()
+        else:
+            mgkfs_rk4_step()
 
         if frame_id % stride == 0:
             if visualize == "velocity":
